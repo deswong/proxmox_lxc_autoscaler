@@ -1,8 +1,10 @@
 # Proxmox Universal AI Autoscaler 🚀
 
-A lightweight, purely Python-based service that brings proactive AI autoscaling natively to your **Proxmox Virtual Machines (QEMU/KVM)** and **Linux Containers (LXC)**. 
+**Stop reacting to server crashes. Start predicting them.**
 
-Instead of waiting for your servers to hit 100% saturation and stall, this daemon polls Proxmox's native historical RRD telemetry APIs and uses an **XGBoost Regressor** to forecast computing trends into the future. It intelligently hotplugs CPU cores and RAM allocations *before* the spike hits, while strictly enforcing host-level limiters to ensure you never starve your hypervisor of overhead resources. 
+A lightweight, purely Python-based service that brings proactive AI autoscaling natively to your **Proxmox Virtual Machines (QEMU/KVM)** and **Linux Containers (LXC)**.
+
+Instead of waiting for your servers to hit 100% saturation and stall, this daemon polls Proxmox's native historical RRD telemetry APIs and uses a lightning-fast **XGBoost engine** to forecast computing trends. It intelligently hotplugs CPU cores and RAM allocations *before* the spike hits, all while strictly enforcing host-level limiters to ensure you never starve your hypervisor.
 
 Zero database tuning, zero complex Prometheus stacks—just one service keeping your Proxmox instances fast and your host safe.
 

@@ -50,38 +50,7 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch host usage: {e}")
             return {"cpu_percent": 0.0, "ram_percent": 0.0, "total_ram_mb": 0.0}
 
-    def get_lxc_metrics(self, lxc_id: str) -> dict:
-        """Fetches the current CPU and RAM metric usage for a specific LXC."""
-        if not self.proxmox:
-            return None
-            
-        try:
-            status = self.node.lxc(lxc_id).status.current.get()
-            
-            if status.get("status") != "running":
-                return None
-            
-            # CPU ratio from Proxmox
-            cpu = status.get("cpu", 0) * 100
-            
-            # Memory bytes converted to MB
-            mem_bytes = status.get("mem", 0)
-            mem_mb = mem_bytes / (1024 * 1024)
-            
-            # Configured limits
-            maxmem_bytes = status.get("maxmem", 0)
-            maxmem_mb = maxmem_bytes / (1024 * 1024)
-            cpus_allocated = status.get("cpus", 1)
-            
-            return {
-                "cpu_percent": float(cpu),
-                "ram_usage_mb": float(mem_mb),
-                "allocated_cpus": int(cpus_allocated),
-                "allocated_ram_mb": float(maxmem_mb)
-            }
-        except Exception as e:
-            logger.error(f"Failed to fetch metrics for LXC {lxc_id}: {e}")
-            return None
+
 
     def update_lxc_resources(self, lxc_id: str, cpus: int, ram_mb: int):
         """Updates the CPU cores and RAM allocation of a running LXC."""
@@ -118,49 +87,32 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch RRD history for LXC {lxc_id}: {e}")
             return []
 
-    def get_all_lxc_ids(self) -> list:
+    def get_all_lxc_metrics(self) -> dict:
         """
-        Returns a list of all LXC IDs currently existing on the target Proxmox node.
+        Returns a dictionary mapping LXC IDs to their parsed current telemetry.
+        Eliminates the need to sequentially API ping every single LXC for baseline status.
         """
         if not self.proxmox:
-            return []
+            return {}
             
         try:
             lxcs = self.node.lxc.get()
-            return [str(lxc['vmid']) for lxc in lxcs]
+            metrics_dict = {}
+            for lxc in lxcs:
+                if lxc.get("status") != "running":
+                    continue
+                    
+                vmid = str(lxc['vmid'])
+                metrics_dict[vmid] = {
+                    "cpu_percent": float(lxc.get("cpu", 0) * 100),
+                    "ram_usage_mb": float(lxc.get("mem", 0) / (1024 * 1024)),
+                    "allocated_cpus": int(lxc.get("cpus", 1)),
+                    "allocated_ram_mb": float(lxc.get("maxmem", 0) / (1024 * 1024))
+                }
+            return metrics_dict
         except Exception as e:
-            logger.error(f"Failed to fetch list of LXCs from node {NODE_NAME}: {e}")
-            return []
-
-    def get_vm_metrics(self, vm_id: str) -> dict:
-        """Fetches the current CPU and RAM metric usage for a specific VM."""
-        if not self.proxmox:
-            return None
-            
-        try:
-            status = self.node.qemu(vm_id).status.current.get()
-            
-            if status.get("status") != "running":
-                return None
-            
-            cpu = status.get("cpu", 0) * 100
-            
-            mem_bytes = status.get("mem", 0)
-            mem_mb = mem_bytes / (1024 * 1024)
-            
-            maxmem_bytes = status.get("maxmem", 0)
-            maxmem_mb = maxmem_bytes / (1024 * 1024)
-            cpus_allocated = status.get("cpus", 1)
-            
-            return {
-                "cpu_percent": float(cpu),
-                "ram_usage_mb": float(mem_mb),
-                "allocated_cpus": int(cpus_allocated),
-                "allocated_ram_mb": float(maxmem_mb)
-            }
-        except Exception as e:
-            logger.error(f"Failed to fetch metrics for VM {vm_id}: {e}")
-            return None
+            logger.error(f"Failed to fetch bulk telemetry for LXCs from node {NODE_NAME}: {e}")
+            return {}
 
     def update_vm_resources(self, vm_id: str, cpus: int, ram_mb: int):
         """Updates the CPU cores and RAM allocation of a running VM."""
@@ -193,16 +145,28 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch RRD history for VM {vm_id}: {e}")
             return []
 
-    def get_all_vm_ids(self) -> list:
+    def get_all_vm_metrics(self) -> dict:
         """
-        Returns a list of all VM IDs currently existing on the target Proxmox node.
+        Returns a dictionary mapping VM IDs to their parsed current telemetry.
         """
         if not self.proxmox:
-            return []
+            return {}
             
         try:
             vms = self.node.qemu.get()
-            return [str(vm['vmid']) for vm in vms]
+            metrics_dict = {}
+            for vm in vms:
+                if vm.get("status") != "running":
+                    continue
+                    
+                vmid = str(vm['vmid'])
+                metrics_dict[vmid] = {
+                    "cpu_percent": float(vm.get("cpu", 0) * 100),
+                    "ram_usage_mb": float(vm.get("mem", 0) / (1024 * 1024)),
+                    "allocated_cpus": int(vm.get("cpus", 1)),
+                    "allocated_ram_mb": float(vm.get("maxmem", 0) / (1024 * 1024))
+                }
+            return metrics_dict
         except Exception as e:
-            logger.error(f"Failed to fetch list of VMs from node {NODE_NAME}: {e}")
-            return []
+            logger.error(f"Failed to fetch bulk telemetry for VMs from node {NODE_NAME}: {e}")
+            return {}

@@ -39,27 +39,23 @@ def run():
         explicit_baselines = storage.get_baselines()
         from config import EXCLUDED_LXCS, MAX_HOST_CPU_ALLOCATION_PERCENT, MAX_HOST_RAM_ALLOCATION_PERCENT
         
-        # 3. Discover all running LXCs and VMs on the hypervisor
-        all_lxc_ids = px_client.get_all_lxc_ids()
-        all_vm_ids = px_client.get_all_vm_ids()
+        # 3. Bulk fetch telemetry for all running LXCs and VMs
+        all_lxc_metrics = px_client.get_all_lxc_metrics()
+        all_vm_metrics = px_client.get_all_vm_metrics()
         
         from config import EXCLUDED_VMS
         
-        if not all_lxc_ids and not all_vm_ids:
-            logger.warning("No LXCs or VMs found on this node. Nothing to monitor.")
+        if not all_lxc_metrics and not all_vm_metrics:
+            logger.warning("No running LXCs or VMs found on this node. Nothing to monitor.")
         
         # 4. Evaluate each discovered LXC
-        for lxc_id in all_lxc_ids:
+        for lxc_id, current_metrics in all_lxc_metrics.items():
             if lxc_id in EXCLUDED_LXCS:
                 logger.debug(f"[LXC {lxc_id}] Skipping (Listed in EXCLUDED_LXCS blacklist).")
                 continue
                 
             try:
-                # Fetch current telemetry from hypervisor
-                current_metrics = px_client.get_lxc_metrics(lxc_id)
-                if not current_metrics:
-                    logger.debug(f"[LXC {lxc_id}] Is not running or could not fetch metrics. Skipping.")
-                    continue
+                # current_metrics is already bulk-fetched from RAM
                     
                 # Determine baseline: Use explicit if it exists, otherwise build a dynamic one
                 if lxc_id in explicit_baselines:
@@ -92,17 +88,13 @@ def run():
                 logger.error(f"[LXC {lxc_id}] Exception during autoscaling cycle: {e}")
                 
         # 5. Evaluate each discovered VM
-        for vm_id in all_vm_ids:
+        for vm_id, current_metrics in all_vm_metrics.items():
             if vm_id in EXCLUDED_VMS:
                 logger.debug(f"[VM {vm_id}] Skipping (Listed in EXCLUDED_VMS blacklist).")
                 continue
                 
             try:
-                # Fetch current telemetry from hypervisor
-                current_metrics = px_client.get_vm_metrics(vm_id)
-                if not current_metrics:
-                    logger.debug(f"[VM {vm_id}] Is not running or could not fetch metrics. Skipping.")
-                    continue
+                # current_metrics is already bulk-fetched from RAM
                     
                 # Determine baseline: Use explicit if it exists, otherwise build a dynamic one
                 if vm_id in explicit_baselines:

@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import logging.handlers
+from dotenv import load_dotenv
 
 load_dotenv()
 

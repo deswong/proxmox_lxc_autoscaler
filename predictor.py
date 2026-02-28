@@ -16,6 +16,39 @@ class Predictor:
         self.models_dir = models_dir
         if not os.path.exists(models_dir):
             os.makedirs(models_dir)
+            
+        self._model_cache = {}  # Store loaded models in RAM
+        self._model_mtimes = {} # Store file modification times to detect fresh nightly trains
+        
+    def _get_model(self, model_path: str):
+        """
+        Retrieves a cached XGBoost Booster from RAM, or loads it from disk if it's new/updated.
+        """
+        if not os.path.exists(model_path):
+            # Explicit RAM optimization: If the user deleted the container or added it to EXCLUDE_List,
+            # the nightly trainer will delete the .json file. We must evict it from RAM.
+            if model_path in self._model_cache:
+                del self._model_cache[model_path]
+                del self._model_mtimes[model_path]
+            return None
+            
+        mtime = os.path.getmtime(model_path)
+        
+        # Cache hit
+        if model_path in self._model_cache and self._model_mtimes.get(model_path) == mtime:
+            return self._model_cache[model_path]
+            
+        # Cache miss or file was updated
+        try:
+            # Using raw Booster is fundamentally faster and lighter than the Scikit-Learn XGBRegressor wrapper
+            booster = xgb.Booster()
+            booster.load_model(model_path)
+            self._model_cache[model_path] = booster
+            self._model_mtimes[model_path] = mtime
+            return booster
+        except Exception as e:
+            logger.error(f"Failed to load native C++ XGBoost model from {model_path}: {e}")
+            return None
         
     def predict_next_usage(self, entity_id: str, rrd_data: List[dict], entity_type: str = "LXC") -> dict:
         """
@@ -71,21 +104,16 @@ class Predictor:
                     X_features.append((m.get('cpu', 0.0) * 100))
                     X_features.append((m.get('mem', 0.0) / (1024 * 1024)))
                 
-                # Single row prediction matrix
-                X_pred = np.array([X_features])
+                # Retrieve from lightning RAM cache instead of Disk Load
+                model_cpu = self._get_model(cpu_model_path)
+                model_ram = self._get_model(ram_model_path)
                 
-                model_cpu = xgb.XGBRegressor()
-                model_cpu.load_model(cpu_model_path)
-                
-                model_ram = xgb.XGBRegressor()
-                model_ram.load_model(ram_model_path)
-                
-                pred_cpu = max(0.0, float(model_cpu.predict(X_pred)[0]))
-                pred_ram = max(0.0, float(model_ram.predict(X_pred)[0]))
-
-                # Explicitly drop XGBoost C++ handles
-                del model_cpu
-                del model_ram
+                if model_cpu and model_ram:
+                    # Native XGBoost Booster uses DMatrix instead of raw numpy lists directly
+                    dmatrix = xgb.DMatrix(np.array([X_features]))
+                    
+                    pred_cpu = max(0.0, float(model_cpu.predict(dmatrix)[0]))
+                    pred_ram = max(0.0, float(model_ram.predict(dmatrix)[0]))
 
             except Exception as e:
                 logger.error(f"Failed to run XGBoost inference for {entity_type} {entity_id}: {e}")
