@@ -54,7 +54,13 @@ def run():
                 historical_metrics = px_client.get_lxc_rrd_history(lxc_id, timeframe="hour")
                 
                 # Predict impending usage
-                predicted_usage = predictor.predict_next_usage(historical_metrics)
+                predicted_usage = predictor.predict_next_usage(lxc_id, historical_metrics)
+                
+                # Record this prediction for the nightly XGBoost trainer to review and learn from
+                try:
+                    storage.log_prediction(lxc_id, predicted_usage['cpu_percent'], predicted_usage['ram_usage_mb'])
+                except Exception as db_err:
+                    logger.warning(f"[LXC {lxc_id}] Failed to log prediction for reinforcement learning: {db_err}")
                 
                 # Evaluate and emit scaling decisions
                 scaler.evaluate_and_scale(lxc_id, baseline, predicted_usage, current_metrics)

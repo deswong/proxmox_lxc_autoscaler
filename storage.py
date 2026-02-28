@@ -29,6 +29,22 @@ def init_db():
         )
     ''')
     
+    # Table to store reinforcement learning metrics (predicted vs actual)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS prediction_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lxc_id TEXT,
+            timestamp REAL,
+            predicted_cpu REAL,
+            predicted_ram REAL
+        )
+    ''')
+    
+    # Create an index for faster time-series querying during batch training
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_pred_lxc_time ON prediction_logs(lxc_id, timestamp)
+    ''')
+    
     conn.commit()
     conn.close()
     
@@ -87,3 +103,38 @@ def get_baselines() -> Dict[str, Dict]:
     
     conn.close()
     return baselines
+
+def log_prediction(lxc_id: str, predicted_cpu: float, predicted_ram: float):
+    """
+    Saves a prediction to the database so the batch training script can 
+    compare it against actual historical usage later to calculate penalties.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    current_time = time.time()
+    cursor.execute('''
+        INSERT INTO prediction_logs (lxc_id, timestamp, predicted_cpu, predicted_ram)
+        VALUES (?, ?, ?, ?)
+    ''', (str(lxc_id), current_time, predicted_cpu, predicted_ram))
+    
+    conn.commit()
+    conn.close()
+
+def cleanup_prediction_logs(retention_days=14):
+    """
+    Prunes prediction logs older than the retention period to stop the SQLite file 
+    from growing forever. Defaults to 14 days, offering plenty of time for weekly training.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cutoff_time = time.time() - (retention_days * 86400)
+    cursor.execute("DELETE FROM prediction_logs WHERE timestamp < ?", (cutoff_time,))
+    deleted = cursor.rowcount
+    
+    conn.commit()
+    conn.close()
+    
+    if deleted > 0:
+        logger.debug(f"Pruned {deleted} old reinforcement learning logs.")

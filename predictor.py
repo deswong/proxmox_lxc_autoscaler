@@ -1,90 +1,102 @@
 import numpy as np
-from sklearn.linear_model import LinearRegression
+import xgboost as xgb
 import logging
+import os
 from typing import List, Tuple
 
 logger = logging.getLogger("predictor")
 
 class Predictor:
-    def __init__(self, prediction_horizon=3):
+    def __init__(self, prediction_horizon=2, models_dir="./models"):
         """
         prediction_horizon: Number of future intervals (minutes) to predict.
-        We predict 3 minutes into the future by default to proactively scale before spikes.
+        models_dir: Location where the nightly training cron task will save the XGBoost .json weights.
         """
         self.prediction_horizon = prediction_horizon
+        self.models_dir = models_dir
+        if not os.path.exists(models_dir):
+            os.makedirs(models_dir)
         
-    def predict_next_usage(self, rrd_data: List[dict]) -> dict:
+    def predict_next_usage(self, lxc_id: str, rrd_data: List[dict]) -> dict:
         """
-        Takes a chronological list of dicts from Proxmox RRD API:
-        [{'time': UNIX_EPOCH, 'cpu': 0.05, 'maxcpu': 2, 'mem': bytes, 'maxmem': bytes}]
-        Returns predicted CPU percent and RAM usage (MB) using Linear Regression forecasting.
+        Takes chronological data from Proxmox RRD API.
+        Only performs fast inference using pre-trained XGBoost weights. 
+        If no weights exist yet (first day), falls back to the latest telemetry reading safely.
         """
         # Filter out invalid or purely null/0 data points that might appear in RRD
         valid_metrics = [m for m in rrd_data if m.get('cpu') is not None and m.get('mem') is not None]
         
         if not valid_metrics:
-            return {"cpu_percent": 0.0, "ram_usage_mb": 0.0}
+            return {"cpu_percent": 0.0, "ram_usage_mb": 0.0, "recent_peak_cpu": 0.0, "recent_peak_ram": 0.0}
             
         # We want the most recent 15 valid data points for a smooth, fast trend
         metrics = valid_metrics[-15:]
+        
+        # Capture peaks before destroying the array
+        highest_recent_cpu = float(max([m.get('cpu', 0.0) * 100 for m in metrics]))
+        highest_recent_ram = float(max([m.get('mem', 0.0) / (1024 * 1024) for m in metrics]))
         
         # Explicit memory optimization: We no longer need the heavy original RRD json array
         # or the large filtered array. Free them before we spin up Scikit-Learn matrices.
         del rrd_data
         del valid_metrics
             
-        if len(metrics) < 3:
-            # Not enough data for a reliable trend, return the most recent reading
-            latest = metrics[-1]
+        latest = metrics[-1]
+        fallback_cpu = (latest.get('cpu', 0.0) * 100)
+        fallback_ram = (latest.get('mem', 0.0) / (1024 * 1024))
+        
+        if len(metrics) < 15:
+            # Not enough data for the rigid XGBoost feature array, fallback
+            del metrics
             return {
-                "cpu_percent": (latest.get('cpu', 0.0) * 100),
-                "ram_usage_mb": (latest.get('mem', 0.0) / (1024 * 1024))
+                "cpu_percent": fallback_cpu,
+                "ram_usage_mb": fallback_ram,
+                "recent_peak_cpu": highest_recent_cpu,
+                "recent_peak_ram": highest_recent_ram
             }
             
-        # Prepare data for Scikit-Learn
-        # We'll normalize X (time) to relative minute intervals 0, 1, 2, ...
-        # We just use index position as time interval to keep regression simple
-        X = np.arange(len(metrics)).reshape(-1, 1)
+        # Try to load models
+        cpu_model_path = os.path.join(self.models_dir, f"lxc_{lxc_id}_cpu.json")
+        ram_model_path = os.path.join(self.models_dir, f"lxc_{lxc_id}_ram.json")
         
-        # Proxmox CPU graph data is a ratio 0.0 -> 1.0 per core usually, 
-        # or overall ratio. Multiply by 100 for percent.
-        y_cpu = np.array([(m.get('cpu', 0.0) * 100) for m in metrics])
-        y_ram = np.array([(m.get('mem', 0.0) / (1024 * 1024)) for m in metrics])
+        pred_cpu = fallback_cpu
+        pred_ram = fallback_ram
         
-        # Explicit memory optimization: Free the intermediate array list
+        if os.path.exists(cpu_model_path) and os.path.exists(ram_model_path):
+            try:
+                # Prepare data identically to training phase: flatten the 15 intervals into 30 features
+                X_features = []
+                for m in metrics:
+                    X_features.append((m.get('cpu', 0.0) * 100))
+                    X_features.append((m.get('mem', 0.0) / (1024 * 1024)))
+                
+                # Single row prediction matrix
+                X_pred = np.array([X_features])
+                
+                model_cpu = xgb.XGBRegressor()
+                model_cpu.load_model(cpu_model_path)
+                
+                model_ram = xgb.XGBRegressor()
+                model_ram.load_model(ram_model_path)
+                
+                pred_cpu = max(0.0, float(model_cpu.predict(X_pred)[0]))
+                pred_ram = max(0.0, float(model_ram.predict(X_pred)[0]))
+
+                # Explicitly drop XGBoost C++ handles
+                del model_cpu
+                del model_ram
+
+            except Exception as e:
+                logger.error(f"Failed to run XGBoost inference for LXC {lxc_id}: {e}")
+        else:
+            logger.debug(f"No XGBoost models found yet for LXC {lxc_id}. Falling back to live metrics.")
+                
+        # Explicit memory optimization
         del metrics
-        
-        # Fit Linear Regression for CPU
-        model_cpu = LinearRegression()
-        model_cpu.fit(X, y_cpu)
-        
-        # Fit Linear Regression for RAM
-        model_ram = LinearRegression()
-        model_ram.fit(X, y_ram)
-        
-        # Predict at X = current_index + prediction_horizon
-        future_X = np.array([[len(metrics) - 1 + self.prediction_horizon]])
-        
-        pred_cpu = model_cpu.predict(future_X)[0]
-        pred_ram = model_ram.predict(future_X)[0]
-        
-        # Ensure predictions don't drop below 0
-        pred_cpu = max(0.0, float(pred_cpu))
-        pred_ram = max(0.0, float(pred_ram))
-        
-        # Also check against recent actual peaks to ensure we don't scale down immediately 
-        # during transient drops when the trend isn't steeply downwards yet.
-        highest_recent_cpu = max(y_cpu)
-        highest_recent_ram = max(y_ram)
-        
-        # If the prediction is lower than highest recent limit, but the trend isn't severely downward, 
-        # we might want to blend the prediction with peak memory.
-        # But for autoscaler safety, returning the pure regression prediction is fine as long as
-        # the scaler adds an overhead buffer (e.g. +20%).
         
         return {
             "cpu_percent": pred_cpu,
             "ram_usage_mb": pred_ram,
-            "recent_peak_cpu": float(highest_recent_cpu),
-            "recent_peak_ram": float(highest_recent_ram)
+            "recent_peak_cpu": highest_recent_cpu,
+            "recent_peak_ram": highest_recent_ram
         }
