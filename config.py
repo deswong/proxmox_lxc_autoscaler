@@ -24,12 +24,23 @@ MAX_HOST_CPU_ALLOCATION_PERCENT = float(os.getenv("MAX_HOST_CPU_ALLOCATION_PERCE
 MAX_HOST_RAM_ALLOCATION_PERCENT = float(os.getenv("MAX_HOST_RAM_ALLOCATION_PERCENT", 85.0))
 
 # Initial Baselines
-try:
-    INITIAL_LXC_CONFIGS_STR = os.getenv("INITIAL_LXC_CONFIGS", "{}")
-    INITIAL_LXC_CONFIGS = json.loads(INITIAL_LXC_CONFIGS_STR)
-except json.JSONDecodeError:
-    logger.error("Failed to parse INITIAL_LXC_CONFIGS from .env. Must be valid JSON.")
-    INITIAL_LXC_CONFIGS = {}
+INITIAL_LXC_CONFIGS = {}
+for key, value in os.environ.items():
+    if key.startswith("LXC_") and len(key) > 4:
+        try:
+            lxc_id = key.split("_")[1]
+            parts = value.split(",")
+            if len(parts) == 4:
+                INITIAL_LXC_CONFIGS[lxc_id] = {
+                    "min_cpus": int(parts[0].strip()),
+                    "min_ram_mb": int(parts[1].strip()),
+                    "max_cpus": int(parts[2].strip()),
+                    "max_ram_mb": int(parts[3].strip())
+                }
+            else:
+                logger.warning(f"Skipping {key}: Must have exactly 4 values (min_cpu, min_ram, max_cpu, max_ram)")
+        except Exception as e:
+            logger.error(f"Failed to parse environment variable {key}={value}. Error: {e}")
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "autoscaler.db")
 POLL_INTERVAL_SECONDS = 60
