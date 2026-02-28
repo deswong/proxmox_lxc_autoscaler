@@ -11,7 +11,7 @@ Zero database tuning, zero complex Prometheus stacks—just one service keeping 
 - **Native Proxmox Integration**: Uses Proxmox's internal `rrddata` graph APIs. No local metrics databases to manage or bloat over time.
 - **Hotpluggable Safety**: Dynamically adjusts CPU cores and Memory allocation on-the-fly without container restarts.
 - **Hypervisor Aware**: Bounded by customizable maximum host limits (e.g., stops scaling if the node exceeds 85% total resource allocation).
-- **Persistent Baselines**: Minimum and maximum boundaries per LXC are strictly enforced and saved across power-cycles in a lightweight, local SQLite config file.
+- **Persistent Baselines**: Minimum and maximum boundaries per LXC are easily defined in the `.env` via simple `LXC_100=min_cpu,min_ram,max_cpu,max_ram` variables. These baselines are automatically seeded into a local SQLite database to outlive power cycles.
 
 ## Quickstart
 1. Clone the repository into your Proxmox Host.
