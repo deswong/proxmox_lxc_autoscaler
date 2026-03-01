@@ -11,6 +11,7 @@ Zero database tuning, zero complex Prometheus stacks—just one service keeping 
 ## Features
 - **Proactive Scaling**: Looks up to 2 minutes into the future to predict impending spikes, allocating resources before they are needed.
 - **Batched Reinforcement Learning:** The underlying Machine Learning engine trains offline automatically every night, meaning the live scaling engine uses zero RAM and CPU on your Proxmox host.
+- **Boot Storm Protection:** Automatically enforces a 15-minute grace period on recently restarted VMs and LXCs to prevent the AI from learning from artificial startup CPU spikes.
 - **Native Proxmox Integration**: Uses Proxmox's internal `rrddata` graph APIs to pull usage metrics without needing custom local telemetry agents or guest-agents.
 - **Universal Hotplugging**: Dynamically adjusts CPU cores and Memory allocation on-the-fly without restarting the VMs or containers.
   - *Note: For VMs, you MUST explicitly enable "Hotplug: Memory, CPU" in the Proxmox UI under the VM Hardware settings.*
