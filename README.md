@@ -101,7 +101,7 @@ tail -f /var/log/proxmox_ai_autoscaler.log
 If you wish to completely remove the autoscaler from your Proxmox server, you can run the one-line uninstall script. It will safely stop the systemd service, remove the nightly cron jobs, and delete all logs and configurations generated in `/opt/`.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/deswong/proxmox_ai_autoscaler/main/uninstall.sh | sudo bash
+curl -sL https://raw.githubusercontent.com/deswong/proxmox_ai_autoscaler/main/uninstall.sh | bash
 ```
 
 ---
