@@ -17,7 +17,8 @@ class ProxmoxClient:
                 user=PROXMOX_USER,
                 token_name=PROXMOX_TOKEN_ID,
                 token_value=PROXMOX_TOKEN_SECRET,
-                verify_ssl=False
+                verify_ssl=False,
+                timeout=30
             )
             self.node = self.proxmox.nodes(NODE_NAME)
             logger.info(f"Successfully connected to Proxmox node {NODE_NAME} at {PROXMOX_HOST}")
