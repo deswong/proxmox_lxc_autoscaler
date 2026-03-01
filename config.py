@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import logging.handlers
 from dotenv import load_dotenv
@@ -7,8 +6,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Setup logging
-log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('proxmox_autoscaler')
+log_formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("proxmox_autoscaler")
 logger.setLevel(logging.INFO)
 
 # Console Handler
@@ -20,12 +21,14 @@ logger.addHandler(console_handler)
 LOG_FILE_PATH = "/var/log/proxmox_ai_autoscaler.log"
 try:
     file_handler = logging.handlers.RotatingFileHandler(
-        LOG_FILE_PATH, maxBytes=5*1024*1024, backupCount=3
+        LOG_FILE_PATH, maxBytes=5 * 1024 * 1024, backupCount=3
     )
     file_handler.setFormatter(log_formatter)
     logger.addHandler(file_handler)
 except PermissionError:
-    logger.warning(f"Permission denied to write to {LOG_FILE_PATH}. Logging to console only until permissions are fixed by install script.")
+    logger.warning(
+        f"Permission denied to write to {LOG_FILE_PATH}. Logging to console only until permissions are fixed by install script."
+    )
 except Exception as e:
     logger.error(f"Failed to setup file logging at {LOG_FILE_PATH}: {e}")
 
@@ -40,8 +43,12 @@ PROXMOX_TOKEN_SECRET = os.getenv("PROXMOX_TOKEN_SECRET", "")
 NODE_NAME = os.getenv("NODE_NAME", "pve")
 
 # Scaling Settings
-MAX_HOST_CPU_ALLOCATION_PERCENT = min(float(os.getenv("MAX_HOST_CPU_ALLOCATION_PERCENT", 85.0)), 95.0)
-MAX_HOST_RAM_ALLOCATION_PERCENT = min(float(os.getenv("MAX_HOST_RAM_ALLOCATION_PERCENT", 85.0)), 95.0)
+MAX_HOST_CPU_ALLOCATION_PERCENT = min(
+    float(os.getenv("MAX_HOST_CPU_ALLOCATION_PERCENT", 85.0)), 95.0
+)
+MAX_HOST_RAM_ALLOCATION_PERCENT = min(
+    float(os.getenv("MAX_HOST_RAM_ALLOCATION_PERCENT", 85.0)), 95.0
+)
 
 # Training Settings
 TRAINING_DAYS_LOOKBACK = int(os.getenv("TRAINING_DAYS_LOOKBACK", 7))
@@ -60,16 +67,20 @@ for key, value in os.environ.items():
                     "min_cpus": int(parts[0].strip()),
                     "min_ram_mb": int(parts[1].strip()),
                     "max_cpus": int(parts[2].strip()),
-                    "max_ram_mb": int(parts[3].strip())
+                    "max_ram_mb": int(parts[3].strip()),
                 }
                 if prefix == "LXC":
                     INITIAL_LXC_CONFIGS[entity_id] = config_dict
                 else:
                     INITIAL_VM_CONFIGS[entity_id] = config_dict
             else:
-                logger.warning(f"Skipping {key}: Must have exactly 4 values (min_cpu, min_ram, max_cpu, max_ram)")
+                logger.warning(
+                    f"Skipping {key}: Must have exactly 4 values (min_cpu, min_ram, max_cpu, max_ram)"
+                )
         except Exception as e:
-            logger.error(f"Failed to parse environment variable {key}={value}. Error: {e}")
+            logger.error(
+                f"Failed to parse environment variable {key}={value}. Error: {e}"
+            )
 
 # Excluded Containers and VMs
 # Comma-separated list of IDs to never autoscale
