@@ -82,7 +82,8 @@ nano /opt/proxmox-ai-autoscaler/.env
   * You can explicitly define boundaries by prefixing your Proxmox node ID with `VM_` or `LXC_`.
   * Multiplier Format: `<TYPE>_<ID>=min_cpu_cores,min_ram_mb,max_cpu_cores,max_ram_mb`
   * Example: `VM_100=1,1024,4,4096` means Virtual Machine #100 will never drop below 1 CPU / 1024MB RAM, and will never boost past 4 CPUs / 4096MB RAM, regardless of what the AI predicts.
-  * ⚠️ **Note:** Proxmox enforces a strict minimum limit of `1024` MB for VM Memory Hotplugging. If you set a VM's `min_ram_mb` lower than this, the autoscaler will safely floor it at 1024MB to prevent API crashes. LXCs do not have this limitation and can be downscaled seamlessly.
+  * ⚠️ **Note 1 (Proxmox Limit):** Proxmox enforces a strict minimum limit of `1024` MB for VM Memory Hotplugging. If you set a VM's `min_ram_mb` lower than this, the autoscaler will safely floor it at 1024MB to prevent API crashes.
+  * ⚠️ **Note 2 (Guest OS Limit):** To prevent severe kernel crashes and file corruption, most Guest Operating Systems actively reject Memory Hot-Unplugging. Because of this, **the autoscaler natively prevents automatically scaling down a VM's RAM.** If a VM scales UP to 8GB during a spike, it will safely remain at 8GB permanently until you manually shut down and restart the machine from the Proxmox UI. LXC Containers do not suffer from either of these limitations and will perfectly scale up and down symmetrically on the fly!
 * **Blacklisting (Ignored Entities)**: You can completely block auto-discovery for isolated environments by listing their IDs in `EXCLUDED_VMS=101,102` or `EXCLUDED_LXCS=105`.
 
 Once configured, tell systemd to start the autoscaler:
