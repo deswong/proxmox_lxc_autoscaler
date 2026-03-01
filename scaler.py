@@ -26,11 +26,7 @@ class Scaler:
         Evaluates predictions against max/min baselines and overall node health.
         Triggers a scaling action if requirements change.
         """
-        logger.info(
-            f"[{entity_type} {entity_id}] Analyzing... Current State: "
-            f"{current_metrics['allocated_cpus']} Cores, {current_metrics['allocated_ram_mb']} MB RAM. "
-            f"Predicted Need: {predicted['cpu_percent']:.1f}% CPU, {predicted['ram_usage_mb']:.0f} MB RAM."
-        )
+
 
         if not current_metrics:
             logger.warning(
@@ -56,6 +52,13 @@ class Scaler:
             desired_cpus += 1
         elif predicted["cpu_percent"] < 25.0 and current_metrics["cpu_percent"] < 25.0:
             desired_cpus -= 1
+
+        logger.info(
+            f"[{entity_type} {entity_id}] Analyzing... Current State: "
+            f"{current_metrics['allocated_cpus']} Cores, {current_metrics['allocated_ram_mb']} MB RAM. "
+            f"Predicted Need: {desired_cpus} Cores ({predicted['cpu_percent']:.1f}%), "
+            f"{predicted['ram_usage_mb']:.0f} MB RAM."
+        )
 
         # 2. Bound against configured baselines (min/max for this entity)
         target_ram = max(
