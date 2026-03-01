@@ -19,7 +19,9 @@ class Predictor:
             os.makedirs(models_dir)
 
         self._model_cache = {}  # Store loaded models in RAM
-        self._model_mtimes = {}  # Store file modification times to detect fresh nightly trains
+        self._model_mtimes = (
+            {}
+        )  # Store file modification times to detect fresh nightly trains
 
     def _get_model(self, model_path: str):
         """
@@ -79,9 +81,9 @@ class Predictor:
         metrics = valid_metrics[-15:]
 
         # Capture peaks before destroying the array
-        highest_recent_cpu = float(max([m.get("cpu", 0.0) * 100 for m in metrics]))
+        highest_recent_cpu = float(max(m.get("cpu", 0.0) * 100 for m in metrics))
         highest_recent_ram = float(
-            max([m.get("mem", 0.0) / (1024 * 1024) for m in metrics])
+            max(m.get("mem", 0.0) / (1024 * 1024) for m in metrics)
         )
 
         # Explicit memory optimization: We no longer need the heavy original RRD json array

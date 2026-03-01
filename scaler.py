@@ -26,7 +26,11 @@ class Scaler:
         Evaluates predictions against max/min baselines and overall node health.
         Triggers a scaling action if requirements change.
         """
-        logger.info(f"[{entity_type} {entity_id}] Analyzing metrics & predictions...")
+        logger.info(
+            f"[{entity_type} {entity_id}] Analyzing... Current State: "
+            f"{current_metrics['allocated_cpus']} Cores, {current_metrics['allocated_ram_mb']} MB RAM. "
+            f"Predicted Need: {predicted['cpu_percent']:.1f}% CPU, {predicted['ram_usage_mb']:.0f} MB RAM."
+        )
 
         if not current_metrics:
             logger.warning(
@@ -59,16 +63,6 @@ class Scaler:
         )
         target_cpus = max(baseline["min_cpus"], min(desired_cpus, baseline["max_cpus"]))
 
-        # Log CPU changes only if they pass baseline bounds
-        if target_cpus > current_metrics["allocated_cpus"]:
-            logger.info(
-                f"[{entity_type} {entity_id}] CPU usage predicting high ({predicted['cpu_percent']:.1f}%), scaling UP cores."
-            )
-        elif target_cpus < current_metrics["allocated_cpus"]:
-            logger.info(
-                f"[{entity_type} {entity_id}] CPU usage predicting low ({predicted['cpu_percent']:.1f}%), scaling DOWN cores."
-            )
-
         # Proxmox hotplug mechanism requires at least 1024 MB for VMs, and hot-unplug is generally unreliable
         if entity_type == "VM":
             if target_ram < 1024:
@@ -100,7 +94,8 @@ class Scaler:
             and target_cpus > current_metrics["allocated_cpus"]
         ):
             logger.warning(
-                f"[{entity_type} {entity_id}] SAFETY CAP: Cannot scale CPU up. Host Node CPU is over threshold ({host_metrics['cpu_percent']:.1f}% > {safe_cpu_limit}%)."
+                f"[{entity_type} {entity_id}] SAFETY CAP: Cannot scale CPU up. Host Node CPU is over "
+                f"threshold ({host_metrics['cpu_percent']:.1f}% > {safe_cpu_limit}%)."
             )
             # Limit scale up to current allocation
             target_cpus = current_metrics["allocated_cpus"]
@@ -110,7 +105,8 @@ class Scaler:
             and target_ram > current_metrics["allocated_ram_mb"]
         ):
             logger.warning(
-                f"[{entity_type} {entity_id}] SAFETY CAP: Cannot scale RAM up. Host Node RAM is over threshold ({host_metrics['ram_percent']:.1f}% > {safe_ram_limit}%)."
+                f"[{entity_type} {entity_id}] SAFETY CAP: Cannot scale RAM up. Host Node RAM is over "
+                f"threshold ({host_metrics['ram_percent']:.1f}% > {safe_ram_limit}%)."
             )
             # But we can allow scaling down RAM, just not UP.
             target_ram = current_metrics["allocated_ram_mb"]
@@ -120,8 +116,22 @@ class Scaler:
         ram_diff = abs(target_ram - current_metrics["allocated_ram_mb"])
 
         if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 64:
+            cpu_action = "UNCHANGED"
+            if target_cpus > current_metrics["allocated_cpus"]:
+                cpu_action = "UP"
+            elif target_cpus < current_metrics["allocated_cpus"]:
+                cpu_action = "DOWN"
+
+            ram_action = "UNCHANGED"
+            if target_ram > current_metrics["allocated_ram_mb"]:
+                ram_action = "UP"
+            elif target_ram < current_metrics["allocated_ram_mb"]:
+                ram_action = "DOWN"
+
             logger.info(
-                f"[{entity_type} {entity_id}] Scaling Required. Target CPU: {target_cpus} (was {current_metrics['allocated_cpus']}), Target RAM: {target_ram} MB (was {current_metrics['allocated_ram_mb']} MB)"
+                f"[{entity_type} {entity_id}] Scaling Required. "
+                f"CPU: {cpu_action} to {target_cpus} (was {current_metrics['allocated_cpus']}), "
+                f"RAM: {ram_action} to {target_ram} MB (was {current_metrics['allocated_ram_mb']} MB)"
             )
 
             if entity_type == "LXC":

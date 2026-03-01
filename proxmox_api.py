@@ -114,9 +114,7 @@ class ProxmoxClient:
             lxcs = self.node.lxc.get()
             return [str(lxc["vmid"]) for lxc in lxcs]
         except Exception as e:
-            logger.error(
-                f"Failed to fetch LXC IDs from node {NODE_NAME}: {e}"
-            )
+            logger.error(f"Failed to fetch LXC IDs from node {NODE_NAME}: {e}")
             return []
 
     def get_all_lxc_metrics(self) -> dict:
@@ -200,9 +198,7 @@ class ProxmoxClient:
             vms = self.node.qemu.get()
             return [str(vm["vmid"]) for vm in vms]
         except Exception as e:
-            logger.error(
-                f"Failed to fetch VM IDs from node {NODE_NAME}: {e}"
-            )
+            logger.error(f"Failed to fetch VM IDs from node {NODE_NAME}: {e}")
             return []
 
     def get_all_vm_metrics(self) -> dict:

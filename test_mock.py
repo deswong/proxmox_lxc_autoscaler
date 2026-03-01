@@ -23,12 +23,12 @@ def test_predictor():
     print(f"Predicted Output: {predictions}")
 
     # Assertions - XGBoost fallback logic currently returns the latest valid metric when <15 elements
-    assert predictions["cpu_percent"] == 75.0, (
-        "CPU Prediction fallback should match the latest metric"
-    )
-    assert predictions["ram_usage_mb"] == 1024.0, (
-        "RAM Prediction fallback should match the latest metric"
-    )
+    assert (
+        predictions["cpu_percent"] == 75.0
+    ), "CPU Prediction fallback should match the latest metric"
+    assert (
+        predictions["ram_usage_mb"] == 1024.0
+    ), "RAM Prediction fallback should match the latest metric"
 
     # Simulate a falling trend
     metrics_falling = [
@@ -44,12 +44,12 @@ def test_predictor():
     print("Metrics: CPU falling 90 -> 15, RAM falling 2048 -> 512")
     print(f"Predicted Output: {predictions_fallback}")
 
-    assert predictions_fallback["cpu_percent"] == 15.0, (
-        "CPU Prediction fallback should match the latest metric"
-    )
-    assert predictions_fallback["ram_usage_mb"] == 512.0, (
-        "RAM Prediction fallback should match the latest metric"
-    )
+    assert (
+        predictions_fallback["cpu_percent"] == 15.0
+    ), "CPU Prediction fallback should match the latest metric"
+    assert (
+        predictions_fallback["ram_usage_mb"] == 512.0
+    ), "RAM Prediction fallback should match the latest metric"
 
 
 def test_scaler():
@@ -83,9 +83,9 @@ def test_scaler():
     # It should refuse to scale up CPU beyond current (2) and refuse to scale RAM beyond current (2048)
     # even though predictions want 3 cores and 4096 * 1.2 RAM.
     # Since both are capped to their current states, the Scaler will deliberately NOT make an API call to Proxmox.
-    assert px.last_update is None, (
-        "Scaler should abort the API call since all requested scale-ups were denied by the safety cap!"
-    )
+    assert (
+        px.last_update is None
+    ), "Scaler should abort the API call since all requested scale-ups were denied by the safety cap!"
 
 
 if __name__ == "__main__":
