@@ -80,8 +80,9 @@ nano /opt/proxmox-ai-autoscaler/.env
   * `MAX_HOST_CPU_ALLOCATION_PERCENT=85` safely prevents the autoscaler from assigning more than 85% of your host's physical cores. Do not set this to 100, or your hypervisor itself may stall.
 * **Resource Baselines**: 
   * You can explicitly define boundaries by prefixing your Proxmox node ID with `VM_` or `LXC_`.
-  * Multiplier Format: `VM_<ID>=min_cpu_cores,min_ram_mb,max_cpu_cores,max_ram_mb`
-  * Example: `VM_100=1,512,4,4096` means Virtual Machine #100 will never drop below 1 CPU / 512MB RAM, and will never boost past 4 CPUs / 4096MB RAM, regardless of what the AI predicts.
+  * Multiplier Format: `<TYPE>_<ID>=min_cpu_cores,min_ram_mb,max_cpu_cores,max_ram_mb`
+  * Example: `VM_100=1,1024,4,4096` means Virtual Machine #100 will never drop below 1 CPU / 1024MB RAM, and will never boost past 4 CPUs / 4096MB RAM, regardless of what the AI predicts.
+  * ⚠️ **Note:** Proxmox enforces a strict minimum limit of `1024` MB for VM Memory Hotplugging. If you set a VM's `min_ram_mb` lower than this, the autoscaler will safely floor it at 1024MB to prevent API crashes. LXCs do not have this limitation and can be downscaled seamlessly.
 * **Blacklisting (Ignored Entities)**: You can completely block auto-discovery for isolated environments by listing their IDs in `EXCLUDED_VMS=101,102` or `EXCLUDED_LXCS=105`.
 
 Once configured, tell systemd to start the autoscaler:
