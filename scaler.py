@@ -47,6 +47,11 @@ class Scaler:
         # 2. Bound against configured baselines (min/max for this entity)
         target_ram = max(baseline['min_ram_mb'], min(int(desired_ram_mb), baseline['max_ram_mb']))
         target_cpus = max(baseline['min_cpus'], min(desired_cpus, baseline['max_cpus']))
+        
+        # Proxmox hotplug mechanism requires at least 1024 MB for VMs
+        if entity_type == "VM" and target_ram < 1024:
+            logger.info(f"[{entity_type} {entity_id}] Enforcing Proxmox VM hotplug minimum of 1024 MB RAM.")
+            target_ram = 1024
 
         # 3. Check physical node limits before scaling UP
         # Fetch live host node metrics
