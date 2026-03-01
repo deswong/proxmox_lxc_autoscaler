@@ -28,7 +28,7 @@ def enable_hotplug():
     skipped_count = 0
     error_count = 0
 
-    for vm_id in all_vm_metrics.keys():
+    for vm_id in all_vm_metrics:
         if vm_id in EXCLUDED_VMS:
             logger.info(f"Skipping VM {vm_id} (Listed in EXCLUDED_VMS).")
             skipped_count += 1

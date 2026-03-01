@@ -56,15 +56,17 @@ def test_scaler():
     from scaler import Scaler
 
     class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+
         def get_host_usage(self):
             # Simulate host node under extreme load, triggering the 95% safety cap
             return {"cpu_percent": 96.0, "ram_percent": 98.0, "total_ram_mb": 64000}
 
-        def update_lxc_resources(self, lxc_id, cpus, ram_mb):
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
             self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
 
     px = MockProxmoxClient()
-    px.last_update = None
     scaler = Scaler(px)
 
     baseline = {"min_cpus": 1, "max_cpus": 8, "min_ram_mb": 512, "max_ram_mb": 8192}
