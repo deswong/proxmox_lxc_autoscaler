@@ -117,6 +117,41 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch LXC IDs from node {NODE_NAME}: {e}")
             return []
 
+    def get_entity_notes(self, entity_id: str, entity_type: str) -> str:
+        """
+        Retrieves the 'description' field (Notes in UI) for an LXC or VM.
+        """
+        if not self.proxmox:
+            return ""
+
+        try:
+            if entity_type == "LXC":
+                config = self.node.lxc(entity_id).config.get()
+            else:
+                config = self.node.qemu(entity_id).config.get()
+
+            return config.get("description", "")
+        except Exception as e:
+            logger.error(f"Failed to fetch notes for {entity_type} {entity_id}: {e}")
+            return ""
+
+    def set_entity_notes(self, entity_id: str, entity_type: str, notes: str) -> bool:
+        """
+        Updates the 'description' field (Notes in UI) for an LXC or VM.
+        """
+        if not self.proxmox:
+            return False
+
+        try:
+            if entity_type == "LXC":
+                self.node.lxc(entity_id).config.put(description=notes)
+            else:
+                self.node.qemu(entity_id).config.put(description=notes)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set notes for {entity_type} {entity_id}: {e}")
+            return False
+
     def get_all_lxc_metrics(self) -> dict:
         """
         Returns a dictionary mapping LXC IDs to their parsed current telemetry.

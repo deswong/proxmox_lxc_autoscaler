@@ -68,6 +68,21 @@ def run():
             try:
                 # current_metrics is already bulk-fetched from RAM
 
+                # Check and record initial resource allocation to notes
+                notes = px_client.get_entity_notes(lxc_id, "LXC")
+                if "[Proxmox AI Autoscaler - Initial Allocation]" not in notes:
+                    logger.info(
+                        f"[LXC {lxc_id}] First time detection. Recording initial resources to notes."
+                    )
+                    initial_allocation_stamp = (
+                        "\n\n[Proxmox AI Autoscaler - Initial Allocation]\n"
+                        f"CPU Cores: {current_metrics['allocated_cpus']}\n"
+                        f"RAM: {int(current_metrics['allocated_ram_mb'])} MB\n"
+                    )
+                    px_client.set_entity_notes(
+                        lxc_id, "LXC", notes + initial_allocation_stamp
+                    )
+
                 # Determine baseline: Use explicit if it exists, otherwise build a dynamic one
                 if lxc_id in explicit_baselines:
                     baseline = explicit_baselines[lxc_id]
@@ -132,6 +147,21 @@ def run():
 
             try:
                 # current_metrics is already bulk-fetched from RAM
+
+                # Check and record initial resource allocation to notes
+                notes = px_client.get_entity_notes(vm_id, "VM")
+                if "[Proxmox AI Autoscaler - Initial Allocation]" not in notes:
+                    logger.info(
+                        f"[VM {vm_id}] First time detection. Recording initial resources to notes."
+                    )
+                    initial_allocation_stamp = (
+                        "\n\n[Proxmox AI Autoscaler - Initial Allocation]\n"
+                        f"CPU Cores: {current_metrics['allocated_cpus']}\n"
+                        f"RAM: {int(current_metrics['allocated_ram_mb'])} MB\n"
+                    )
+                    px_client.set_entity_notes(
+                        vm_id, "VM", notes + initial_allocation_stamp
+                    )
 
                 # Determine baseline: Use explicit if it exists, otherwise build a dynamic one
                 if vm_id in explicit_baselines:
