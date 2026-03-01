@@ -27,7 +27,6 @@ class Scaler:
         Triggers a scaling action if requirements change.
         """
 
-
         if not current_metrics:
             logger.warning(
                 f"[{entity_type} {entity_id}] No current metrics to base scaling on. Skipping."
@@ -68,6 +67,13 @@ class Scaler:
 
         # Proxmox hotplug mechanism requires at least 1024 MB for VMs, and hot-unplug is generally unreliable
         if entity_type == "VM":
+            if target_cpus < current_metrics["allocated_cpus"]:
+                # The prediction wanted to scale down CPU, but we block it
+                logger.info(
+                    f"[{entity_type} {entity_id}] VM CPU hot-unplug is generally unsupported by guest OS. Preventing CPU scale-down."
+                )
+                target_cpus = current_metrics["allocated_cpus"]
+
             if target_ram < 1024:
                 if (
                     target_ram != current_metrics["allocated_ram_mb"]
