@@ -141,8 +141,8 @@ def run():
 
     from config import EXCLUDED_LXCS
 
-    # 2. Discover all running LXCs on the node
-    all_lxc_ids = list(px_client.get_all_lxc_metrics().keys())
+    # 2. Discover all LXCs on the node
+    all_lxc_ids = px_client.get_all_lxc_ids()
 
     if not all_lxc_ids:
         logger.warning("No LXCs found on this node. Nothing to train.")
@@ -160,8 +160,8 @@ def run():
         except Exception as e:
             logger.error(f"Fatal error training LXC {lxc_id}: {e}")
 
-    # 3. Discover all running VMs on the node
-    all_vm_ids = list(px_client.get_all_vm_metrics().keys())
+    # 3. Discover all VMs on the node
+    all_vm_ids = px_client.get_all_vm_ids()
     from config import EXCLUDED_VMS
 
     if not all_vm_ids:

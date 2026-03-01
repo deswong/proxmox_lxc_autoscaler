@@ -103,6 +103,22 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch RRD history for LXC {lxc_id}: {e}")
             return []
 
+    def get_all_lxc_ids(self) -> list:
+        """
+        Returns a list of all LXC IDs on the node, regardless of running status.
+        """
+        if not self.proxmox:
+            return []
+
+        try:
+            lxcs = self.node.lxc.get()
+            return [str(lxc["vmid"]) for lxc in lxcs]
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch LXC IDs from node {NODE_NAME}: {e}"
+            )
+            return []
+
     def get_all_lxc_metrics(self) -> dict:
         """
         Returns a dictionary mapping LXC IDs to their parsed current telemetry.
@@ -171,6 +187,22 @@ class ProxmoxClient:
             return rrd_data
         except Exception as e:
             logger.error(f"Failed to fetch RRD history for VM {vm_id}: {e}")
+            return []
+
+    def get_all_vm_ids(self) -> list:
+        """
+        Returns a list of all VM IDs on the node, regardless of running status.
+        """
+        if not self.proxmox:
+            return []
+
+        try:
+            vms = self.node.qemu.get()
+            return [str(vm["vmid"]) for vm in vms]
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch VM IDs from node {NODE_NAME}: {e}"
+            )
             return []
 
     def get_all_vm_metrics(self) -> dict:
