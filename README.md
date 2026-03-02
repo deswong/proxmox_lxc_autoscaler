@@ -13,6 +13,7 @@ Zero database tuning, zero complex Prometheus stacks—just one service keeping 
 - **Batched Reinforcement Learning:** The underlying Machine Learning engine trains offline automatically every night, meaning the live scaling engine uses zero RAM and CPU on your Proxmox host.
 - **Initial Allocation Baselining**: Automatically records your original CPU and RAM configuration to the Proxmox UI Notes before making any automated adjustments.
 - **Boot Storm Protection**: Automatically enforces a 15-minute grace period on recently restarted VMs and LXCs to prevent the AI from learning from artificial startup CPU spikes.
+- **Intelligent Swap Management**: Natively manages LXC swap caps using the same ML predictions as RAM. Includes automated Safe Swap Flushing, gently dropping the swap cap to 0 when saturated to force the host kernel to reclaim pages into available RAM, preventing IO-locking.
 - **Native Proxmox Integration**: Uses Proxmox's internal `rrddata` graph APIs to pull usage metrics without needing custom local telemetry agents or guest-agents.
 - **Universal Hotplugging**: Dynamically adjusts CPU cores and Memory allocation on-the-fly without restarting the VMs or containers.
   - *Note: For VMs, you MUST explicitly enable "Hotplug: Memory, CPU" in the Proxmox UI under the VM Hardware settings.*
@@ -80,12 +81,18 @@ nano /opt/proxmox-ai-autoscaler/.env
 * **`NODE_NAME`**: Set this to the name of your Proxmox server (usually `pve` by default).
 * **System Limits:** 
   * `MAX_HOST_CPU_ALLOCATION_PERCENT=85` safely prevents the autoscaler from assigning more than 85% of your host's physical cores. Do not set this to 100, or your hypervisor itself may stall.
+  * `MAX_HOST_RAM_ALLOCATION_PERCENT=85` safely prevents the autoscaler from assigning more than 85% of your host's physical RAM memory.
+  * `MAX_HOST_SWAP_USAGE_PERCENT=20` actively monitors the Proxmox hypervisor's own swap usage. If the host begins heavily swapping to disk (>20%), the autoscaler will immediately lock down and refuse to scale UP any instances to prevent exacerbating an IO-starved hypervisor.
 * **Resource Baselines**: 
   * You can explicitly define boundaries by prefixing your Proxmox node ID with `VM_` or `LXC_`.
   * Multiplier Format: `<TYPE>_<ID>=min_cpu_cores,min_ram_mb,max_cpu_cores,max_ram_mb`
   * Example: `VM_100=1,1024,4,4096` means Virtual Machine #100 will never drop below 1 CPU / 1024MB RAM, and will never boost past 4 CPUs / 4096MB RAM, regardless of what the AI predicts.
   * ⚠️ **Note 1 (Proxmox Limit):** Proxmox enforces a strict minimum limit of `1024` MB for VM Memory Hotplugging. If you set a VM's `min_ram_mb` lower than this, the autoscaler will safely floor it at 1024MB to prevent API crashes.
   * ⚠️ **Note 2 (Guest OS Limit):** To prevent severe kernel crashes and file corruption, most Guest Operating Systems actively reject CPU and Memory Hot-Unplugging. Because of this, **the autoscaler natively prevents automatically scaling down a VM's CPU and RAM.** If a VM scales UP to 4 Cores and 8GB RAM during a spike, it will safely remain there permanently until you manually shut down and shrink the machine from the Proxmox UI. LXC Containers do not suffer from either of these limitations and will perfectly scale up and down symmetrically on the fly!
+* **Swap Management (LXCs Only)**:
+  * `LXC_TARGET_SWAP_MB=-1` dynamically manages LXC swap caps using the ML regressor. `-1` (Auto) sizes swap proportional to predicted peak RAM needs. Set to `0` to permanently disable swap provisioning, or to a fixed number (e.g., `512`) to enforce a static swap cap globally.
+  * `LXC_MIN_SWAP_MB=256` represents the minimum swap floor applied when in Auto mode, guaranteeing instances are never left completely swapless even during light loads.
+  * `SWAP_FLUSH_THRESHOLD_PERCENT=50` controls the saturation point. If an LXC's swap usage exceeds 50% of its cap, the autoscaler initiates a Safe Native Flush (dropping the cap to 0 via API) to force the host kernel to reclaim pages into available RAM, before restoring the cap 1 minute later.
 * **Blacklisting (Ignored Entities)**: You can completely block auto-discovery for isolated environments by listing their IDs in `EXCLUDED_VMS=101,102` or `EXCLUDED_LXCS=105`.
 
 Once configured, tell systemd to start the autoscaler:
@@ -96,6 +103,18 @@ systemctl start proxmox-ai-autoscaler
 You can watch the AI actively predicting and explicitly scaling your instances (e.g., `UP to 4 Cores`) by observing the universal log file:
 ```bash
 tail -f /var/log/proxmox_ai_autoscaler.log
+```
+
+---
+
+## 🛠️ Step 4: Host Kernel Optimization (Optional)
+
+Linux kernels natively favor moving idle pages into swap (swappiness=60) even when physical RAM is available, in order to maximize filesystem cache. For a hypervisor running ML-driven autoscaling, this behavior causes unnecessary disk IO. 
+
+We provide a tuning script to safely configure your Proxmox Host kernel to only swap as an absolute last mathematical resort (`vm.swappiness=1` and `vm.vfs_cache_pressure=50`):
+
+```bash
+sudo bash /opt/proxmox-ai-autoscaler/tools/tune_host_swappiness.sh
 ```
 
 ---
