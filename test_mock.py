@@ -75,6 +75,7 @@ def test_scaler():
         "allocated_cpus": 2,
         "allocated_ram_mb": 2048.0,
         "cpu_percent": 80.0,
+        "allocated_swap_mb": 256.0,
     }
 
     scaler.evaluate_and_scale("100", "LXC", baseline, predicted, current_metrics)
@@ -171,6 +172,7 @@ def test_scaler_min_ram_floor():
         "allocated_cpus": 2,
         "allocated_ram_mb": 2048.0,
         "cpu_percent": 5.0,
+        "allocated_swap_mb": 256.0,
     }
 
     scaler.evaluate_and_scale("201", "LXC", baseline, predicted, current_metrics)
@@ -407,6 +409,78 @@ def test_scaler_safe_flush_guard():
         "Scaler must NOT flush swap when RAM headroom is insufficient"
     )
 
+def test_scaler_swap_cap_corrected_without_ram_change():
+    """Regression test: when RAM and CPU are adequate but the swap cap differs
+    significantly from the target, the scaler must still issue an update to
+    apply the correct swap cap — even with no RAM or CPU change.
+    (Bug: swap pressure was never relieved when only swap cap needed adjusting.)
+    """
+    from scaler import Scaler
+    import config as cfg
+
+    original_target = cfg.LXC_TARGET_SWAP_MB
+    original_min = cfg.LXC_MIN_SWAP_MB
+    cfg.LXC_TARGET_SWAP_MB = -1  # auto mode
+    cfg.LXC_MIN_SWAP_MB = 256
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+            self.flush_called = False
+
+        def get_host_usage(self):
+            return {"cpu_percent": 10.0, "ram_percent": 20.0, "total_ram_mb": 64000}
+
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):
+            self.last_update = {"cpus": cpus, "ram_mb": ram_mb, "swap_mb": swap_mb}
+
+        def flush_lxc_swap(self, _lxc_id):
+            self.flush_called = True
+            return True
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # RAM is fine (usage 900 MB on 2048 MB allocation -> no RAM scaling needed).
+    # CPU is fine. BUT: Proxmox currently has swap_cap=2048 MB (old default),
+    # while ML says target_swap = max(200, 150) * 1.30 = 260 MB -> swap_diff=1788 MB.
+    # The scaler MUST update to apply the new 260 MB cap even with no RAM/CPU change.
+    baseline = {"min_cpus": 2, "max_cpus": 2, "min_ram_mb": 2048.0, "max_ram_mb": 2048.0}
+    predicted = {
+        "cpu_percent": 10.0,
+        "ram_usage_mb": 900.0,
+        "recent_peak_cpu": 12.0,
+        "recent_peak_ram": 950.0,
+        "predicted_swap_mb": 200.0,
+        "recent_peak_swap": 150.0,
+    }
+    current_metrics = {
+        "allocated_cpus": 2,
+        "allocated_ram_mb": 2048.0,
+        "ram_usage_mb": 900.0,
+        "cpu_percent": 10.0,
+        "swap_mb": 30.0,            # Low swap usage — below flush threshold
+        "allocated_swap_mb": 2048.0,  # Old Proxmox default (huge)
+    }
+
+    scaler.evaluate_and_scale("206", "LXC", baseline, predicted, current_metrics)
+    cfg.LXC_TARGET_SWAP_MB = original_target
+    cfg.LXC_MIN_SWAP_MB = original_min
+
+    print("\nTesting Swap Cap Corrected Without RAM Change:")
+    print(f"Update Requested: {px.last_update}")
+
+    assert px.last_update is not None, (
+        "Scaler must issue an update when swap_diff >= 32, even with no RAM/CPU change"
+    )
+    # target_swap = max(int(200 * 1.30), 256) = max(260, 256) = 260 MB
+    assert px.last_update["swap_mb"] <= 300, (
+        f"Swap cap should have been reduced to ~260 MB, got {px.last_update['swap_mb']}"
+    )
+    assert px.last_update["swap_mb"] >= 256, (
+        f"Swap cap should be at least LXC_MIN_SWAP_MB=256, got {px.last_update['swap_mb']}"
+    )
+
 
 if __name__ == "__main__":
     print("Running Mock AI Predictor Tests...")
@@ -418,4 +492,5 @@ if __name__ == "__main__":
     test_scaler_swap_flush_triggered()
     test_scaler_dynamic_swap_sizing()
     test_scaler_safe_flush_guard()
+    test_scaler_swap_cap_corrected_without_ram_change()
     print("All mock tests passed!")

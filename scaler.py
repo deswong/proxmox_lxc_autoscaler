@@ -171,11 +171,17 @@ class Scaler:
             target_swap = 0  # VMs manage swap internally; we don't set this
 
         # 6. Apply changes if different from currently allocated.
-        #    Also triggers if any swap saturation was detected, even with no
-        #    other resource change (to ensure the new swap cap is enforced).
+        #    Triggers on: CPU change, RAM change (>=32 MB), swap cap change (>=32 MB),
+        #    or swap saturation detected — whichever comes first.
         ram_diff = abs(target_ram - current_metrics["allocated_ram_mb"])
+        swap_diff = abs(target_swap - current_metrics.get("allocated_swap_mb", 0.0))
 
-        if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 32 or flush_swap:
+        if (
+            target_cpus != current_metrics["allocated_cpus"]
+            or ram_diff >= 32
+            or swap_diff >= 32
+            or flush_swap
+        ):
             cpu_action = "UNCHANGED"
             if target_cpus > current_metrics["allocated_cpus"]:
                 cpu_action = "UP"
