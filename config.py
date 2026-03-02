@@ -50,6 +50,16 @@ MAX_HOST_RAM_ALLOCATION_PERCENT = min(
     float(os.getenv("MAX_HOST_RAM_ALLOCATION_PERCENT", 85.0)), 95.0
 )
 
+# Swap cap applied to every managed LXC on each resource update.
+# 0 = disable swap entirely (recommended with peak-based RAM scaling).
+# Set to a positive integer (MB) for a safety-net swap allowance.
+LXC_TARGET_SWAP_MB = int(os.getenv("LXC_TARGET_SWAP_MB", 0))
+
+# Flush active swap inside an LXC when its swap usage exceeds this
+# percentage of its current swap cap. Only applies when LXC_TARGET_SWAP_MB=0
+# or when there is residual swap from before the autoscaler took over.
+SWAP_FLUSH_THRESHOLD_PERCENT = float(os.getenv("SWAP_FLUSH_THRESHOLD_PERCENT", 50.0))
+
 # Training Settings
 TRAINING_DAYS_LOOKBACK = int(os.getenv("TRAINING_DAYS_LOOKBACK", 7))
 

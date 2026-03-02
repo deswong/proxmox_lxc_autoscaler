@@ -63,7 +63,7 @@ def test_scaler():
             # Simulate host node under extreme load, triggering the 95% safety cap
             return {"cpu_percent": 96.0, "ram_percent": 98.0, "total_ram_mb": 64000}
 
-        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):  # pylint: disable=unused-argument
             self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
 
     px = MockProxmoxClient()
@@ -102,7 +102,7 @@ def test_scaler_uses_peak_ram():
         def get_host_usage(self):
             return {"cpu_percent": 10.0, "ram_percent": 30.0, "total_ram_mb": 64000}
 
-        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):  # pylint: disable=unused-argument
             self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
 
     px = MockProxmoxClient()
@@ -147,7 +147,7 @@ def test_scaler_min_ram_floor():
         def get_host_usage(self):
             return {"cpu_percent": 5.0, "ram_percent": 20.0, "total_ram_mb": 64000}
 
-        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):  # pylint: disable=unused-argument
             self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
 
     px = MockProxmoxClient()
@@ -198,7 +198,7 @@ def test_scaler_small_deficit_triggers_update():
         def get_host_usage(self):
             return {"cpu_percent": 5.0, "ram_percent": 20.0, "total_ram_mb": 64000}
 
-        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):  # pylint: disable=unused-argument
             self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
 
     px = MockProxmoxClient()
@@ -237,6 +237,60 @@ def test_scaler_small_deficit_triggers_update():
     )
 
 
+def test_scaler_swap_flush_triggered():
+    """When an LXC has swap usage above the threshold the scaler must:
+    1. Call update_lxc_resources with swap_mb=0 (the target cap).
+    2. Call flush_lxc_swap to drain active swap back to RAM.
+    """
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+            self.flush_called = False
+
+        def get_host_usage(self):
+            return {"cpu_percent": 10.0, "ram_percent": 30.0, "total_ram_mb": 64000}
+
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb, swap_mb=0):
+            self.last_update = {"cpus": cpus, "ram_mb": ram_mb, "swap_mb": swap_mb}
+
+        def flush_lxc_swap(self, _lxc_id):
+            self.flush_called = True
+            return True
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # LXC with 400/512 MB swap used -> 78% -> above the 50% threshold
+    baseline = {"min_cpus": 2, "max_cpus": 2, "min_ram_mb": 1024.0, "max_ram_mb": 4096.0}
+    predicted = {
+        "cpu_percent": 10.0,
+        "ram_usage_mb": 900.0,
+        "recent_peak_cpu": 12.0,
+        "recent_peak_ram": 950.0,
+    }
+    current_metrics = {
+        "allocated_cpus": 2,
+        "allocated_ram_mb": 1024.0,
+        "cpu_percent": 10.0,
+        "swap_mb": 400.0,
+        "allocated_swap_mb": 512.0,
+    }
+
+    scaler.evaluate_and_scale("203", "LXC", baseline, predicted, current_metrics)
+
+    print("\nTesting Swap Saturation Flush (400/512 MB swap used, >50% threshold):")
+    print(f"Update Requested: {px.last_update}")
+    print(f"Flush Called: {px.flush_called}")
+
+    assert px.last_update is not None, "Scaler should have issued a resource update"
+    assert px.last_update["swap_mb"] == 0, (
+        f"Scaler should set swap_mb=0, got {px.last_update['swap_mb']}"
+    )
+    assert px.flush_called, "Scaler should have called flush_lxc_swap on swap saturation"
+
+
 if __name__ == "__main__":
     print("Running Mock AI Predictor Tests...")
     test_predictor()
@@ -244,4 +298,5 @@ if __name__ == "__main__":
     test_scaler_uses_peak_ram()
     test_scaler_min_ram_floor()
     test_scaler_small_deficit_triggers_update()
+    test_scaler_swap_flush_triggered()
     print("All mock tests passed!")

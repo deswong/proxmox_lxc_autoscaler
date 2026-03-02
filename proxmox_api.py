@@ -1,4 +1,5 @@
 import logging
+import subprocess
 import time
 from proxmoxer import ProxmoxAPI
 import urllib3
@@ -60,7 +61,7 @@ class ProxmoxClient:
             logger.error(f"Failed to fetch host usage: {e}")
             return {"cpu_percent": 0.0, "ram_percent": 0.0, "total_ram_mb": 0.0}
 
-    def update_lxc_resources(self, lxc_id: str, cpus: int, ram_mb: int):
+    def update_lxc_resources(self, lxc_id: str, cpus: int, ram_mb: int, swap_mb: int = 0):
         """Updates the CPU cores and RAM allocation of a running LXC."""
         if not self.proxmox:
             return False
@@ -69,9 +70,10 @@ class ProxmoxClient:
 
         for attempt in range(max_retries):
             try:
-                # We hotplug the CPU and Memory via the API.
-                # Proxmox config API expects memory in MB
-                self.node.lxc(lxc_id).config.put(cores=int(cpus), memory=int(ram_mb))
+                # Proxmox config API expects memory and swap in MB
+                self.node.lxc(lxc_id).config.put(
+                    cores=int(cpus), memory=int(ram_mb), swap=int(swap_mb)
+                )
                 logger.info(
                     f"[LXC {lxc_id}] Successfully hotplugged resources: {cpus} cores, {ram_mb} MB RAM"
                 )
@@ -84,6 +86,46 @@ class ProxmoxClient:
                     time.sleep(2**attempt)
                 else:
                     return False
+
+    def flush_lxc_swap(self, lxc_id: str) -> bool:
+        """
+        Flushes active swap inside a running LXC by invoking swapoff -a
+        via the pct exec command available on every Proxmox host.
+        This moves swap pages back to RAM immediately, eliminating the IO
+        bottleneck caused by active swap access.
+        """
+        try:
+            result = subprocess.run(
+                ["pct", "exec", str(lxc_id), "--", "swapoff", "-a"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info(f"[LXC {lxc_id}] Swap flushed successfully via pct exec.")
+                return True
+            # swapoff returns 32 when there is no swap to disable — that's fine
+            if result.returncode == 32:
+                logger.debug(f"[LXC {lxc_id}] swapoff: no active swap (already clean).")
+                return True
+            logger.warning(
+                f"[LXC {lxc_id}] pct exec swapoff returned code {result.returncode}: "
+                f"{result.stderr.strip()}"
+            )
+            return False
+        except FileNotFoundError:
+            logger.error(
+                f"[LXC {lxc_id}] 'pct' command not found. "
+                "Ensure the autoscaler is running on the Proxmox host."
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error(f"[LXC {lxc_id}] Swap flush timed out after 30s.")
+            return False
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(f"[LXC {lxc_id}] Unexpected error during swap flush: {exc}")
+            return False
 
     def get_lxc_rrd_history(self, lxc_id: str, timeframe: str = "hour") -> list:
         """
@@ -172,6 +214,8 @@ class ProxmoxClient:
                     "ram_usage_mb": float(lxc.get("mem", 0) / (1024 * 1024)),
                     "allocated_cpus": int(lxc.get("cpus", 1)),
                     "allocated_ram_mb": float(lxc.get("maxmem", 0) / (1024 * 1024)),
+                    "swap_mb": float(lxc.get("swap", 0) / (1024 * 1024)),
+                    "allocated_swap_mb": float(lxc.get("maxswap", 0) / (1024 * 1024)),
                     "uptime": int(lxc.get("uptime", 0)),
                 }
             return metrics_dict

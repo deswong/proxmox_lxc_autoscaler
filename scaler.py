@@ -1,5 +1,10 @@
 import logging
-from config import MAX_HOST_CPU_ALLOCATION_PERCENT, MAX_HOST_RAM_ALLOCATION_PERCENT
+from config import (
+    MAX_HOST_CPU_ALLOCATION_PERCENT,
+    MAX_HOST_RAM_ALLOCATION_PERCENT,
+    LXC_TARGET_SWAP_MB,
+    SWAP_FLUSH_THRESHOLD_PERCENT,
+)
 from proxmox_api import ProxmoxClient
 
 logger = logging.getLogger("scaler")
@@ -123,11 +128,34 @@ class Scaler:
             # But we can allow scaling down RAM, just not UP.
             target_ram = current_metrics["allocated_ram_mb"]
 
-        # 4. Apply changes if different from currently allocated
-        # We also check if the change is significant enough to warrant an API call (e.g., +/- 128 MB RAM, or any CPU change)
+        # 4. Detect swap saturation on LXCs and schedule a post-scale flush.
+        #    High swap means the container is IO-bound on disk; flushing it
+        #    after a RAM scale-up reclaims pages back into the newly freed RAM.
+        flush_swap = False
+        if entity_type == "LXC":
+            swap_used = current_metrics.get("swap_mb", 0.0)
+            swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
+            if swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
+                logger.warning(
+                    f"[LXC {entity_id}] Swap saturation detected "
+                    f"({swap_used:.0f}/{swap_alloc:.0f} MB used). "
+                    "Will flush swap after scale-up."
+                )
+                flush_swap = True
+            elif swap_used > 0 and swap_alloc == 0:
+                # Residual swap from before the autoscaler set swap=0
+                logger.warning(
+                    f"[LXC {entity_id}] Residual active swap detected "
+                    f"({swap_used:.0f} MB). Will flush."
+                )
+                flush_swap = True
+
+        # 5. Apply changes if different from currently allocated.
+        #    Also triggers if any swap saturation was detected, even with no
+        #    other resource change (to ensure swap=0 is enforced immediately).
         ram_diff = abs(target_ram - current_metrics["allocated_ram_mb"])
 
-        if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 32:
+        if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 32 or flush_swap:
             cpu_action = "UNCHANGED"
             if target_cpus > current_metrics["allocated_cpus"]:
                 cpu_action = "UP"
@@ -147,7 +175,11 @@ class Scaler:
             )
 
             if entity_type == "LXC":
-                self.px.update_lxc_resources(entity_id, target_cpus, target_ram)
+                self.px.update_lxc_resources(
+                    entity_id, target_cpus, target_ram, swap_mb=LXC_TARGET_SWAP_MB
+                )
+                if flush_swap:
+                    self.px.flush_lxc_swap(entity_id)
             elif entity_type == "VM":
                 self.px.update_vm_resources(entity_id, target_cpus, target_ram)
         else:
