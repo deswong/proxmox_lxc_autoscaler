@@ -90,8 +90,158 @@ def test_scaler():
     ), "Scaler should abort the API call since all requested scale-ups were denied by the safety cap!"
 
 
+def test_scaler_uses_peak_ram():
+    """Scaler must use recent_peak_ram (not the lower predicted average) as
+    the allocation basis to prevent swap under bursty workloads."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 10.0, "ram_percent": 30.0, "total_ram_mb": 64000}
+
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+            self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # ML forecast says 512 MB, but the observed peak was 900 MB
+    baseline = {"min_cpus": 1, "max_cpus": 8, "min_ram_mb": 512, "max_ram_mb": 8192}
+    predicted = {
+        "cpu_percent": 10.0,
+        "ram_usage_mb": 512.0,
+        "recent_peak_cpu": 15.0,
+        "recent_peak_ram": 900.0,
+    }
+    current_metrics = {
+        "allocated_cpus": 2,
+        "allocated_ram_mb": 600.0,
+        "cpu_percent": 10.0,
+    }
+
+    scaler.evaluate_and_scale("200", "LXC", baseline, predicted, current_metrics)
+
+    print("\nTesting Scaler Uses Peak RAM (Peak 900 MB > Predicted 512 MB):")
+    print(f"Update Requested: {px.last_update}")
+
+    # desired = 900 * 1.30 = 1170 MB -> capped at max_ram_mb=8192, so expect 1170
+    assert px.last_update is not None, "Scaler should have issued an update"
+    assert px.last_update["ram_mb"] >= 1100, (
+        f"Expected allocation based on peak (>=1100 MB), got {px.last_update['ram_mb']}"
+    )
+
+
+def test_scaler_min_ram_floor():
+    """Scaler must never scale below the configured min_ram_mb baseline.
+    With min_ram anchored to the current allocation, an idle LXC with low
+    predicted usage must stay at (or above) its current allocation."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 5.0, "ram_percent": 20.0, "total_ram_mb": 64000}
+
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+            self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # min_ram_mb matches the current allocation (as main.py now sets it).
+    # Pin min/max_cpus to 2 to prevent a CPU scale-down from confounding the test.
+    baseline = {
+        "min_cpus": 2,
+        "max_cpus": 2,
+        "min_ram_mb": 2048.0,
+        "max_ram_mb": 4096.0,
+    }
+    predicted = {
+        "cpu_percent": 5.0,
+        "ram_usage_mb": 200.0,
+        "recent_peak_cpu": 6.0,
+        "recent_peak_ram": 250.0,
+    }
+    current_metrics = {
+        "allocated_cpus": 2,
+        "allocated_ram_mb": 2048.0,
+        "cpu_percent": 5.0,
+    }
+
+    scaler.evaluate_and_scale("201", "LXC", baseline, predicted, current_metrics)
+
+    print("\nTesting Min RAM Floor (Predicted 200 MB on 2048 MB LXC):")
+    print(f"Update Requested: {px.last_update}")
+
+    # desired = 250 * 1.30 = 325 MB, but min_ram_mb=2048 clamps it to 2048.
+    # RAM diff vs current (2048) = 0, CPU unchanged -> no API call at all.
+    assert px.last_update is None, (
+        "Scaler should not make any API call when both RAM "
+        "is floored at current allocation and CPU is unchanged"
+    )
+
+
+def test_scaler_small_deficit_triggers_update():
+    """A 40 MB deficit (above the 32 MB threshold) must trigger an update.
+    Under the old 64 MB threshold this would have been silently ignored."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 5.0, "ram_percent": 20.0, "total_ram_mb": 64000}
+
+        def update_lxc_resources(self, _lxc_id, cpus, ram_mb):
+            self.last_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # Scenario: LXC needs ~540 MB but was allocated 500 MB -> 40 MB gap
+    # peak = 415 MB -> desired = 415 * 1.30 = 539.5 -> int = 539, rounded to 539
+    # diff = |539 - 500| = 39 MB < old 64 MB threshold but >= new 32 MB threshold
+    # Use a slightly higher peak so the diff is clearly >=32 MB
+    # peak = 420 MB -> desired = 420 * 1.30 = 546 -> diff = 46 >= 32 -> should update
+    baseline = {
+        "min_cpus": 1,
+        "max_cpus": 8,
+        "min_ram_mb": 500.0,
+        "max_ram_mb": 4096.0,
+    }
+    predicted = {
+        "cpu_percent": 10.0,
+        "ram_usage_mb": 400.0,
+        "recent_peak_cpu": 12.0,
+        "recent_peak_ram": 420.0,
+    }
+    current_metrics = {
+        "allocated_cpus": 2,
+        "allocated_ram_mb": 500.0,
+        "cpu_percent": 10.0,
+    }
+
+    scaler.evaluate_and_scale("202", "LXC", baseline, predicted, current_metrics)
+
+    print("\nTesting Small Deficit Triggers Update (46 MB gap, new 32 MB threshold):")
+    print(f"Update Requested: {px.last_update}")
+
+    assert px.last_update is not None, (
+        "Scaler should issue update for a 46 MB deficit (above 32 MB threshold)"
+    )
+
+
 if __name__ == "__main__":
     print("Running Mock AI Predictor Tests...")
     test_predictor()
     test_scaler()
+    test_scaler_uses_peak_ram()
+    test_scaler_min_ram_floor()
+    test_scaler_small_deficit_triggers_update()
     print("All mock tests passed!")

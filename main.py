@@ -93,10 +93,12 @@ def run():
                 if lxc_id in explicit_baselines:
                     baseline = explicit_baselines[lxc_id]
                 else:
-                    # Dynamic Zero-Config Baseline Setup
+                    # Dynamic Zero-Config Baseline Setup.
+                    # min_ram_mb is anchored to the current allocation so the
+                    # scaler never shrinks a container below its provisioned size.
                     baseline = {
                         "min_cpus": 1,
-                        "min_ram_mb": 512,
+                        "min_ram_mb": current_metrics["allocated_ram_mb"],
                         "max_cpus": current_metrics["allocated_cpus"] + 4,
                         "max_ram_mb": current_metrics["allocated_ram_mb"] * 2,
                     }
@@ -173,10 +175,12 @@ def run():
                 if vm_id in explicit_baselines:
                     baseline = explicit_baselines[vm_id]
                 else:
-                    # Dynamic Zero-Config Baseline Setup
+                    # Dynamic Zero-Config Baseline Setup.
+                    # min_ram_mb is anchored to the current allocation so the
+                    # scaler never shrinks a VM below its provisioned size.
                     baseline = {
                         "min_cpus": 1,
-                        "min_ram_mb": 512,
+                        "min_ram_mb": current_metrics["allocated_ram_mb"],
                         "max_cpus": current_metrics["allocated_cpus"] + 4,
                         "max_ram_mb": current_metrics["allocated_ram_mb"] * 2,
                     }

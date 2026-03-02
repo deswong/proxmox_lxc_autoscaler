@@ -11,7 +11,7 @@ class Scaler:
 
         # Buffer percentages applied to the prediction to ensure we don't scale
         # too tightly to the absolute exact predicted Mb/Cpu, leaving overhead.
-        self.ram_buffer_percent = 20.0
+        self.ram_buffer_percent = 30.0
         self.cpu_buffer_percent = 20.0
 
     def evaluate_and_scale(
@@ -33,11 +33,14 @@ class Scaler:
             )
             return
 
-        # 1. Calculate the raw desired resources from the predictor
-        #    Add an overhead buffer to the predicted peak
-        desired_ram_mb = predicted["ram_usage_mb"] * (
-            1 + self.ram_buffer_percent / 100.0
+        # 1. Calculate the raw desired resources from the predictor.
+        #    Use the higher of the ML forecast or the observed recent peak so
+        #    that genuine RAM spikes are covered, not just the smoothed average.
+        #    Then apply an overhead buffer on top of that peak value.
+        peak_ram_mb = max(
+            predicted["ram_usage_mb"], predicted.get("recent_peak_ram", 0.0)
         )
+        desired_ram_mb = peak_ram_mb * (1 + self.ram_buffer_percent / 100.0)
 
         # CPU scaling heuristic - proportional to the predicted load:
         # Scale UP: add 1 core for every 15% above the 85% high-water mark
@@ -124,7 +127,7 @@ class Scaler:
         # We also check if the change is significant enough to warrant an API call (e.g., +/- 128 MB RAM, or any CPU change)
         ram_diff = abs(target_ram - current_metrics["allocated_ram_mb"])
 
-        if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 64:
+        if target_cpus != current_metrics["allocated_cpus"] or ram_diff >= 32:
             cpu_action = "UNCHANGED"
             if target_cpus > current_metrics["allocated_cpus"]:
                 cpu_action = "UP"
