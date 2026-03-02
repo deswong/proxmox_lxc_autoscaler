@@ -1,5 +1,4 @@
 import logging
-import subprocess
 import time
 from proxmoxer import ProxmoxAPI
 import urllib3
@@ -89,42 +88,21 @@ class ProxmoxClient:
 
     def flush_lxc_swap(self, lxc_id: str) -> bool:
         """
-        Flushes active swap inside a running LXC by invoking swapoff -a
-        via the pct exec command available on every Proxmox host.
-        This moves swap pages back to RAM immediately, eliminating the IO
-        bottleneck caused by active swap access.
+        Flushes active swap for an LXC by dropping its swap cap to 0 via
+        the Proxmox API. This forces the host kernel to reclaim the swap pages
+        into RAM. The autoscaler will automatically restore the normal
+        target swap cap on its next cycle 1 minute later, providing a safe
+        drain window.
         """
+        if not self.proxmox:
+            return False
+
         try:
-            result = subprocess.run(
-                ["pct", "exec", str(lxc_id), "--", "swapoff", "-a"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-            if result.returncode == 0:
-                logger.info(f"[LXC {lxc_id}] Swap flushed successfully via pct exec.")
-                return True
-            # swapoff returns 32 when there is no swap to disable — that's fine
-            if result.returncode == 32:
-                logger.debug(f"[LXC {lxc_id}] swapoff: no active swap (already clean).")
-                return True
-            logger.warning(
-                f"[LXC {lxc_id}] pct exec swapoff returned code {result.returncode}: "
-                f"{result.stderr.strip()}"
-            )
-            return False
-        except FileNotFoundError:
-            logger.error(
-                f"[LXC {lxc_id}] 'pct' command not found. "
-                "Ensure the autoscaler is running on the Proxmox host."
-            )
-            return False
-        except subprocess.TimeoutExpired:
-            logger.error(f"[LXC {lxc_id}] Swap flush timed out after 30s.")
-            return False
+            self.node.lxc(lxc_id).config.put(swap=0)
+            logger.info(f"[LXC {lxc_id}] Swap flush triggered via API (swap cap dropped to 0).")
+            return True
         except Exception as exc:  # pylint: disable=broad-except
-            logger.error(f"[LXC {lxc_id}] Unexpected error during swap flush: {exc}")
+            logger.error(f"[LXC {lxc_id}] Unexpected error dropping swap cap to flush: {exc}")
             return False
 
     def get_lxc_rrd_history(self, lxc_id: str, timeframe: str = "hour") -> list:
