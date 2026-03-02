@@ -150,6 +150,7 @@ class Scaler:
         #    High swap means the container is IO-bound on disk; flushing it
         #    after a RAM scale-up reclaims pages back into the newly freed RAM.
         flush_swap = False
+        swap_is_draining = False
         if entity_type == "LXC":
             swap_used = current_metrics.get("swap_mb", 0.0)
             swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
@@ -160,20 +161,22 @@ class Scaler:
                     "Will flush swap after scale-up."
                 )
                 flush_swap = True
-            elif swap_used > 0 and swap_alloc == 0:
-                # Residual swap from before the autoscaler took over
-                logger.warning(
-                    f"[LXC {entity_id}] Residual active swap detected "
-                    f"({swap_used:.0f} MB). Will flush."
+            elif swap_alloc == 0 and swap_used > 5.0:
+                # The container's cap is 0, meaning it is actively draining from a prior flush
+                logger.info(
+                    f"[LXC {entity_id}] Swap is actively draining to RAM "
+                    f"({swap_used:.0f} MB remaining). Pausing swap allocation until clear."
                 )
-                flush_swap = True
+                swap_is_draining = True
 
         # 5. Compute the target swap cap for this LXC.
         #    Auto mode (-1): size swap like RAM — use observed peak + 30% buffer,
         #    floored at LXC_MIN_SWAP_MB so no container is ever left fully swapless
         #    during the model cold-start period.
         if entity_type == "LXC":
-            if LXC_TARGET_SWAP_MB == -1:
+            if swap_is_draining:
+                target_swap = 0  # Keep cap at 0 to allow the kernel to finish moving pages
+            elif LXC_TARGET_SWAP_MB == -1:
                 peak_swap = max(
                     predicted.get("predicted_swap_mb", 0.0),
                     predicted.get("recent_peak_swap", 0.0),
