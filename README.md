@@ -18,6 +18,7 @@ Zero database tuning, zero Prometheus stacks — just one service keeping your P
 | **VM Right-Sizing (next reboot)** | Computes optimal CPU/RAM from 14-day observed peaks + 30% headroom; writes as pending Proxmox config |
 | **107-Feature Prediction Engine** | Reads CPU, RAM, disk I/O, network I/O, host load averages, overcommit ratios, time-of-day (as native categoricals), and rate-of-change trends simultaneously |
 | **MAE Penalty-Weighted Training** | Nightly retraining boosts sample weight (1×–3×) for intervals where predictions were most wrong — models self-correct over time |
+| **Performance Reporting** | Every scaling action is logged with before/after values. `report.py` shows savings (RAM freed, CPU freed), scale counts, and per-entity prediction accuracy |
 | **Host-Aware Scaling** | Three-tier host pressure response: normal → block scale-ups → actively reclaim RAM from idle containers |
 | **Rich Telemetry Storage** | Every prediction logs 17 environment fields to SQLite (hour, load avg, overcommit, actual usage) powering future training |
 | **Zero-Config Discovery** | No manual container lists required. Dynamic baselines auto-assigned to unknown containers |
@@ -215,7 +216,57 @@ Every prediction is logged to a local SQLite file (`autoscaler.db`) capturing:
 
 The `ctx_actual_*` columns are the key feedback loop — the nightly trainer computes `|predicted - actual|` per interval and boosts sample weights for intervals where the model previously erred, so training accuracy improves automatically over time.
 
-Logs are retained for 14 days and pruned automatically each training run.
+**`scale_events` table** records every actual resource change the autoscaler makes:
+
+| Column | Description |
+|---|---|
+| `action` | `scale_up`, `scale_down`, or `vm_pending_config` |
+| `trigger` | `prediction`, `host_pressure`, or `vm_pending_config` |
+| `cpus_before` / `cpus_after` | CPU core count before and after |
+| `ram_before_mb` / `ram_after_mb` | RAM allocation before and after |
+| `cpu_delta` / `ram_delta_mb` | Net change (negative = freed) |
+
+Both tables are retained for 14 days and pruned automatically each training run.
+
+---
+
+## 📈 Step 5: Performance Reporting
+
+Check how much resource savings the autoscaler has achieved and track prediction accuracy over time:
+
+```bash
+cd /opt/proxmox-ai-autoscaler && source venv/bin/activate
+
+python report.py            # last 24 hours
+python report.py --days 7   # last 7 days
+python report.py --json     # machine-readable JSON for monitoring tools
+```
+
+Example output:
+```
+════════════════════════════════════════════════════════════
+  📊 Proxmox AI Autoscaler — Performance Report
+  Period: Last 7 days
+════════════════════════════════════════════════════════════
+
+  ┌─ Scaling Activity ──────────────────────────────────
+  │  Total events   : 84
+  │  Scale-ups      : 51 events
+  │  Scale-downs    : 30 events
+  │  VM pending cfg : 3 updates (apply on next reboot)
+
+  ┌─ Resource Savings ──────────────────────────────────
+  │  Net RAM freed  : 12288 MB  (12.00 GB)
+  │  Net CPU freed  : 8.0 vCPU cores
+
+  ┌─ Prediction Accuracy (MAE per entity) ──────────────
+  │  Entity        CPU MAE     RAM MAE   Samples
+  │  ──────────────────────────────────────────────
+  │  lxc_200        3.1%      148 MB      10080   ████████████
+  │  lxc_201        1.8%       92 MB      10080   ███████░░░░░
+```
+
+A 24h performance snapshot is also emitted automatically to `/var/log/proxmox_ai_autoscaler.log` at the end of every nightly training run — no manual action required.
 
 ---
 
