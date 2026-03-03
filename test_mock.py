@@ -27,8 +27,6 @@ def test_scale_event_logging():
 
         st.init_db()
 
-        now = time.time()
-
         # Log a scale_down event (RAM freed: 2048 → 1024, -1024 MB)
         st.log_scale_event(
             entity_id="200",
