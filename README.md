@@ -2,142 +2,221 @@
 
 **Stop reacting to server crashes. Start predicting them.**
 
-A lightweight, purely Python-based service that brings proactive AI autoscaling natively to your **Proxmox Virtual Machines (QEMU/KVM)** and **Linux Containers (LXC)**.
+A lightweight, pure-Python service that brings proactive AI autoscaling natively to your **Proxmox Virtual Machines (QEMU/KVM)** and **Linux Containers (LXC)**.
 
-Instead of waiting for your servers to hit 100% saturation and stall, this daemon polls Proxmox's native historical RRD telemetry APIs and uses a lightning-fast **XGBoost engine** to forecast computing trends. It intelligently hotplugs CPU cores and RAM allocations *before* the spike hits, all while strictly enforcing host-level limiters to ensure you never starve your hypervisor.
+Instead of waiting for servers to hit 100% saturation and stall, this daemon polls Proxmox's native historical RRD telemetry APIs and uses a lightning-fast **XGBoost engine** to forecast resource needs 2 minutes ahead. It hotplugs CPU cores and RAM *before* the spike hits, while actively protecting the host hypervisor from overload.
 
-Zero database tuning, zero complex Prometheus stacks—just one service keeping your Proxmox instances fast and your host safe.
-
-## Features
-- **Proactive Scaling**: Looks up to 2 minutes into the future to predict impending spikes, allocating resources before they are needed.
-- **Batched Reinforcement Learning:** The underlying Machine Learning engine trains offline automatically every night, meaning the live scaling engine uses zero RAM and CPU on your Proxmox host.
-- **Initial Allocation Baselining**: Automatically records your original CPU and RAM configuration to the Proxmox UI Notes before making any automated adjustments.
-- **Boot Storm Protection**: Automatically enforces a 15-minute grace period on recently restarted VMs and LXCs to prevent the AI from learning from artificial startup CPU spikes.
-- **Intelligent Swap Management**: Natively manages LXC swap caps using the same ML predictions as RAM. Includes automated Safe Swap Flushing, gently dropping the swap cap to 0 when saturated to force the host kernel to reclaim pages into available RAM, preventing IO-locking.
-- **Native Proxmox Integration**: Uses Proxmox's internal `rrddata` graph APIs to pull usage metrics without needing custom local telemetry agents or guest-agents.
-- **Universal Hotplugging**: Dynamically adjusts CPU cores and Memory allocation on-the-fly without restarting the VMs or containers.
-  - *Note: For VMs, you MUST explicitly enable "Hotplug: Memory, CPU" in the Proxmox UI under the VM Hardware settings.*
-
-## How it Works
-### 1. The XGBoost Engine & Batched Learning
-Machine learning requires significant RAM and CPU to build reliable matrices. Rather than stalling your hypervisor by training models continuously, this autoscaler is strictly separated into two components:
-1. **The Fast Inference Daemon (`main.py`)**: Runs every 60 seconds. It fetches the last 15 minutes of RRD metrics and passes them through a pre-trained `.json` model. This takes milliseconds and costs ~0% CPU. It logs the accuracy of its prediction into a local SQLite DB for later review.
-2. **The Batched Trainer (`train_models.py`)**: Runs once a day via cron (e.g. 3:00 AM). It downloads the last week (or month) of metrics and the logged prediction errors, mathematically calculating the Mean Absolute Error (MAE). It uses these heavy datasets to train a fresh `xgboost` regressor for every single VM and LXC organically, writing the `.json` weights to disk for the inference daemon to seamlessly pick up the next morning.
-
-### 2. Overcommitting & The 95% Host Safeguard
-Proxmox allows you to allocate more CPU cores and RAM to containers than you physically possess on the motherboard (overcommitting). While this is great for virtualization, an aggressive AI could easily allocate 200% of your RAM across your instances and instantly crash the Proxmox Kernel out of memory (OOM).
-
-To prevent this, the autoscaler implements a **Hard 95.0% Emergency Stop**. During every single 60-second cycle, the daemon asks the Proxmox Node for its *true physical utilization*. If your server is currently using >95.0% of its physical RAM or CPU, the AI is mathematically forbidden from scaling any instance *upward*, no matter how badly it needs it. It will continue to scale instances *downward* to free up resources, eventually relieving the node. You can control this threshold in the `.env` via `MAX_HOST_CPU_ALLOCATION_PERCENT`.
-
-### 3. Zero-Config Discovery
-You do not need to tell the autoscaler which instances to manage. By default, it queries the Proxmox API for every VM and LXC on the node, regardless of whether they are currently powered on or off.
-
-If it finds an instance that is not strictly defined in your `.env` file, it assigns it a **Dynamic Baseline**:
-- **Min CPU:** 1
-- **Min RAM:** 512MB
-- **Max CPU:** Current Cores + 4
-- **Max RAM:** Current RAM * 2
-
-If you want to explicitly override these dynamic baselines for a specific container/VM, or completely hide it from the AI, edit the `.env` file mapping.
+Zero database tuning, zero Prometheus stacks — just one service keeping your Proxmox instances fast and your host safe.
 
 ---
 
-## 🛠️ Step 1: Getting your Proxmox API Token
+## ✨ Features
 
-To allow the autoscaler to magically adjust your hardware, you need to create a secure API token inside Proxmox.
+| Feature | Details |
+|---|---|
+| **Proactive ML Scaling** | XGBoost forecasts resource needs 2 minutes ahead — before spikes degrade performance |
+| **107-Feature Prediction Engine** | Reads CPU, RAM, disk I/O, network I/O, host load averages, overcommit ratios, time-of-day, and rate-of-change trends simultaneously |
+| **Host-Aware Scaling** | Three-tier host pressure response: normal → block scale-ups → actively reclaim RAM from idle containers when host RAM > 90% |
+| **Batched Nightly Learning** | Offline GPU/CPU-heavy training runs at 3AM via cron. Live daemon uses pre-trained `.json` weights — costs ~0% host CPU |
+| **Intelligent Swap Management** | ML-driven LXC swap cap sizing with Safe Flush: drops cap to 0 to force the kernel to reclaim pages into RAM, then restores |
+| **Rich Telemetry Storage** | Every prediction logs 17 environment fields to SQLite (hour, load avg, overcommit ratios, actual usage) for increasingly accurate future training |
+| **Zero-Config Discovery** | No manual container lists required. Dynamic baselines auto-assigned to unknown containers |
+| **Boot Storm Protection** | 15-minute grace period after reboots prevents AI from learning from artificial startup spikes |
+| **Universal Hotplugging** | Adjusts CPU and RAM live — no container/VM restarts required |
+
+---
+
+## 🧠 How it Works
+
+### 1. The XGBoost Prediction Engine
+
+The system learns *patterns*, not just thresholds. The feature vector fed to XGBoost has **107 inputs** per prediction:
+
+```
+[0-89]   Per-container history (15 intervals × 6 metrics):
+          cpu%, ram_mb, disk_read_bps, disk_write_bps, net_in_bps, net_out_bps
+
+[90-99]  Hypervisor health context:
+          host_cpu%, host_ram%, host_swap%,
+          load_avg_1m, load_avg_5m, ksm_sharing_mb,
+          cpu_overcommit_ratio, ram_overcommit_ratio, container_count, (reserved)
+
+[100-101] Temporal context:
+           hour_of_day (0–23), day_of_week (0=Mon…6=Sun)
+
+[101-106] Rate-of-change deltas (last − first of the 15-minute window):
+           Δcpu%, Δram_mb, Δdiskread, Δdiskwrite, Δnetin, Δnetout
+```
+
+This means the model understands *not only* how loaded a container is right now, but whether that load is rising or falling, how stressed the overall hypervisor is, and whether it's 9AM Monday (typically high load) or 3AM Sunday (typically quiet).
+
+### 2. Two-Component Architecture
+
+Training is computationally expensive. Inference is not. They are strictly separated so your hypervisor is never burdened by ML training during peak hours:
+
+1. **Live Inference Daemon (`main.py`)** — runs every 60 seconds. Fetches the last 15 minutes of RRD metrics, runs them through pre-trained `.json` model weights in milliseconds, and hotplugs resources if a significant change is predicted. Logs the full environment context to SQLite for the trainer to use later.
+
+2. **Nightly Batch Trainer (`train_models.py`)** — runs at 3AM via cron. Downloads the last week of RRD history, correlates it against node-level RRD data, builds a 107-column feature matrix, applies time-based exponential sample weights (recent data matters more), and trains a fresh XGBoost regressor for every LXC and VM. New weights are available to the daemon by dawn.
+
+### 3. Host-Aware, Three-Tier Pressure Response
+
+Every 60-second cycle, the daemon checks the physical node's CPU, RAM, and swap utilization. The response is *graduated*, not binary:
+
+| Host RAM % | Action |
+|---|---|
+| < 85% | Normal operation |
+| 85–90% | Block scale-ups to prevent making things worse |
+| **> 90%** | **Block scale-ups** *and* **actively push idle containers down** — if a container is using < 50% of its RAM allocation, it's shrunk to `usage × 1.5` (floored at `min_ram_mb`) |
+
+The active reclaim guard is conservative: **both** conditions must be true simultaneously (host RAM > 90% AND container usage < 50% of allocation), so a busy container is never shrunk during a host-wide load event.
+
+### 4. Zero-Config Discovery
+
+No need to list containers in a config file. The daemon queries the Proxmox API every cycle and assigns **dynamic baselines** to unrecognised instances:
+
+| Limit | Dynamic Value |
+|---|---|
+| Min CPU | 1 core |
+| Min RAM | Current allocated RAM (won't shrink below today's allocation) |
+| Max CPU | Current cores + 4 |
+| Max RAM | Current RAM × 2 |
+
+Override these for specific containers in the `.env` file, or add to the exclusion list to ignore them entirely.
+
+---
+
+## 🛠️ Step 1: Create a Proxmox API Token
 
 1. Log into your Proxmox Web GUI.
-2. Navigate to **Datacenter** -> **Permissions** -> **API Tokens**.
+2. Navigate to **Datacenter** → **Permissions** → **API Tokens**.
 3. Click **Add**.
-4. Select the user `root@pam`.
-5. Name the Token ID something memorable, like `autoscaler`.
-6. Uncheck "Privilege Separation" so the autoscaler has permission to adjust hardware.
-7. Click **Add**.
-8. ⚠️ **IMPORTANT:** A window will pop up with your **Secret**. Once you close this window, you can *never* see the secret again. Copy it down immediately!
+4. Select user `root@pam`, name the token (e.g. `autoscaler`).
+5. Uncheck **Privilege Separation**.
+6. Click **Add** and immediately **copy the Secret** — it is shown only once.
 
 ---
 
 ## 🚀 Step 2: One-Line Installation
 
-Run the automated one-liner script. This securely clones the repository to the standard `/opt/proxmox-ai-autoscaler` directory, safely configures the Python Machine Learning environment, registers the daemon, and provisions your nightly XGBoost automated-training chron-jobs implicitly.
-
 ```bash
 curl -sL https://raw.githubusercontent.com/deswong/proxmox_ai_autoscaler/main/install.sh | bash
 ```
 
+Installs to `/opt/proxmox-ai-autoscaler`, registers the systemd service, and provisions the nightly training cron job automatically.
+
 ---
 
-## ⚙️ Step 3: Configuration & Start
+## ⚙️ Step 3: Configure and Start
 
-The script installs the daemon, but holds off on starting it until you connect your Proxmox API.
-
-Open the newly generated `.env` file using a text editor like `nano`:
+Open the generated `.env` file:
 ```bash
 nano /opt/proxmox-ai-autoscaler/.env
 ```
 
-### The `.env` File Explained
-* **Authentication**: Paste the `PROXMOX_TOKEN_ID` and `PROXMOX_TOKEN_SECRET` you created in Step 1.
-* **`NODE_NAME`**: Set this to the name of your Proxmox server (usually `pve` by default).
-* **System Limits:** 
-  * `MAX_HOST_CPU_ALLOCATION_PERCENT=85` safely prevents the autoscaler from assigning more than 85% of your host's physical cores. Do not set this to 100, or your hypervisor itself may stall.
-  * `MAX_HOST_RAM_ALLOCATION_PERCENT=85` safely prevents the autoscaler from assigning more than 85% of your host's physical RAM memory.
-  * `MAX_HOST_SWAP_USAGE_PERCENT=20` actively monitors the Proxmox hypervisor's own swap usage. If the host begins heavily swapping to disk (>20%), the autoscaler will immediately lock down and refuse to scale UP any instances to prevent exacerbating an IO-starved hypervisor.
-* **Resource Baselines**: 
-  * You can explicitly define boundaries by prefixing your Proxmox node ID with `VM_` or `LXC_`.
-  * Multiplier Format: `<TYPE>_<ID>=min_cpu_cores,min_ram_mb,max_cpu_cores,max_ram_mb`
-  * Example: `VM_100=1,1024,4,4096` means Virtual Machine #100 will never drop below 1 CPU / 1024MB RAM, and will never boost past 4 CPUs / 4096MB RAM, regardless of what the AI predicts.
-  * ⚠️ **Note 1 (Proxmox Limit):** Proxmox enforces a strict minimum limit of `1024` MB for VM Memory Hotplugging. If you set a VM's `min_ram_mb` lower than this, the autoscaler will safely floor it at 1024MB to prevent API crashes.
-  * ⚠️ **Note 2 (Guest OS Limit):** To prevent severe kernel crashes and file corruption, most Guest Operating Systems actively reject CPU and Memory Hot-Unplugging. Because of this, **the autoscaler natively prevents automatically scaling down a VM's CPU and RAM.** If a VM scales UP to 4 Cores and 8GB RAM during a spike, it will safely remain there permanently until you manually shut down and shrink the machine from the Proxmox UI. LXC Containers do not suffer from either of these limitations and will perfectly scale up and down symmetrically on the fly!
-* **Swap Management (LXCs Only)**:
-  * `LXC_TARGET_SWAP_MB=-1` dynamically manages LXC swap caps using the ML regressor. `-1` (Auto) sizes swap proportional to predicted peak RAM needs. Set to `0` to permanently disable swap provisioning, or to a fixed number (e.g., `512`) to enforce a static swap cap globally.
-  * `LXC_MIN_SWAP_MB=256` represents the minimum swap floor applied when in Auto mode, guaranteeing instances are never left completely swapless even during light loads.
-  * `SWAP_FLUSH_THRESHOLD_PERCENT=50` controls the saturation point. If an LXC's swap usage exceeds 50% of its cap, the autoscaler initiates a Safe Native Flush (dropping the cap to 0 via API) to force the host kernel to reclaim pages into available RAM, before restoring the cap 1 minute later.
-* **Blacklisting (Ignored Entities)**: You can completely block auto-discovery for isolated environments by listing their IDs in `EXCLUDED_VMS=101,102` or `EXCLUDED_LXCS=105`.
+### Authentication
+```env
+PROXMOX_HOST=192.168.1.10
+PROXMOX_TOKEN_ID=root@pam!autoscaler
+PROXMOX_TOKEN_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+NODE_NAME=pve
+```
 
-Once configured, tell systemd to start the autoscaler:
+### Host Safety Limits
+```env
+# Scale-up blocked when host CPU/RAM exceeds these thresholds (hard cap: 95%)
+MAX_HOST_CPU_ALLOCATION_PERCENT=85
+MAX_HOST_RAM_ALLOCATION_PERCENT=85
+
+# All scale-ups blocked when host swap exceeds this (host is IO-starved)
+MAX_HOST_SWAP_USAGE_PERCENT=20
+```
+
+> ⚠️ Never set the CPU/RAM thresholds to 100% — the hypervisor kernel needs headroom to operate.
+
+### Swap Management (LXC Only)
+```env
+LXC_TARGET_SWAP_MB=-1        # -1 = auto-size from ML peak, 0 = disable swap, N = fixed MB
+LXC_MIN_SWAP_MB=256          # Floor applied in auto mode
+SWAP_FLUSH_THRESHOLD_PERCENT=50  # Flush swap when usage > 50% of cap
+```
+
+### Per-Container Baselines
+```env
+# Format: <TYPE>_<ID>=min_cpus,min_ram_mb,max_cpus,max_ram_mb
+LXC_200=1,512,4,4096
+VM_100=1,1024,4,8192   # VMs: min 1024 MB enforced by Proxmox hotplug
+
+# Exclude from autoscaling entirely
+EXCLUDED_LXCS=101,102
+EXCLUDED_VMS=200
+```
+
+> ⚠️ **VM limitations:** Proxmox enforces a 1024 MB minimum for VM memory hotplug. Most guest operating systems also reject CPU/RAM *hot-unplugging*, so the autoscaler only scales VMs **upward** — manual shutdown is required to shrink a VM.
+
+### Start the Service
 ```bash
 systemctl start proxmox-ai-autoscaler
 ```
 
-You can watch the AI actively predicting and explicitly scaling your instances (e.g., `UP to 4 Cores`) by observing the universal log file:
+Watch the AI make decisions live:
 ```bash
 tail -f /var/log/proxmox_ai_autoscaler.log
 ```
 
 ---
 
-## 🛠️ Step 4: Host Kernel Optimization (Optional)
+## 🔧 Step 4: Host Kernel Tuning (Optional)
 
-Linux kernels natively favor moving idle pages into swap (swappiness=60) even when physical RAM is available, in order to maximize filesystem cache. For a hypervisor running ML-driven autoscaling, this behavior causes unnecessary disk IO. 
-
-We provide a tuning script to safely configure your Proxmox Host kernel to only swap as an absolute last mathematical resort (`vm.swappiness=1` and `vm.vfs_cache_pressure=50`):
+By default, Linux kernels eagerly push idle pages to swap (swappiness=60) even when RAM is available. For a hypervisor running ML autoscaling, this creates unnecessary disk I/O. Apply the included tuning script to configure the kernel to only swap as a last resort:
 
 ```bash
 sudo bash /opt/proxmox-ai-autoscaler/tools/tune_host_swappiness.sh
 ```
 
+This sets `vm.swappiness=1` and `vm.vfs_cache_pressure=50`.
+
 ---
 
-## �️ Uninstallation
+## 🗃️ Telemetry Database
 
-If you wish to completely remove the autoscaler from your Proxmox server, you can run the one-line uninstall script. It will safely stop the systemd service, remove the nightly cron jobs, and delete all logs and configurations generated in `/opt/`.
+The autoscaler stores a running log of every prediction in a local SQLite file (`autoscaler.db`). Each row captures:
+
+- **Predicted values**: `predicted_cpu`, `predicted_ram`, `predicted_swap`, `pred_disk_read/write`, `pred_net_in/out`
+- **Environment context**: `ctx_hour`, `ctx_dow`, `ctx_host_load_1m`, `ctx_host_load_5m`, `ctx_cpu_overcommit`, `ctx_ram_overcommit`, `ctx_container_count`
+- **Actual observed usage**: `ctx_actual_cpu`, `ctx_actual_ram`
+
+Logs are retained for 14 days (configurable) and pruned automatically. As the log fills with real production data, nightly training runs become progressively more accurate — particularly for load_avg and overcommit-aware predictions.
+
+---
+
+## 🗑️ Uninstallation
 
 ```bash
 curl -sL https://raw.githubusercontent.com/deswong/proxmox_ai_autoscaler/main/uninstall.sh | bash
 ```
 
+Stops the service, removes cron jobs, and deletes all files under `/opt/proxmox-ai-autoscaler/`.
+
 ---
 
-## �🚑 Troubleshooting
+## 🚑 Troubleshooting
 
-**Q: The logs say it's skipping my VM/LXC or failing to scale.**
-* Double-check that your ID is correctly mapped in the `.env` file (e.g. `VM_105=...`).
-* Ensure you restarted the service after editing the `.env` file! (`systemctl restart proxmox-ai-autoscaler`). 
-* If a **VM** is failing to scale locally but LXCs are working, you MUST enable "Hotplug" in the Proxmox UI for that specific VM under its Hardware options.
+**"No XGBoost models found yet… Falling back to live metrics"**
+> Normal on day one — the nightly trainer hasn't run yet. The daemon uses the latest live RRD reading as a safe fallback. Run training manually to bootstrap immediately:
+> ```bash
+> cd /opt/proxmox-ai-autoscaler && source venv/bin/activate && python train_models.py
+> ```
 
-**Q: "No XGBoost models found yet... Falling back to live metrics"**
-* This is completely normal on your very first day! The nightly trainer hasn't run yet. It will use the raw metric data to scale today, and tomorrow morning it will seamlessly switch to the intelligent gradient-boosting matrices once the 3:00 AM cron script finishes. If you want to force it to train *right now*, run `source venv/bin/activate && python train_models.py` manually.
+**A VM is failing to scale but LXCs work fine**
+> Enable **Hotplug: Memory, CPU** in the Proxmox UI under that VM's Hardware settings.
+
+**Scaling seems too conservative after host pressure events**
+> The autoscaler intentionally holds back during host stress. Once host RAM drops below 85% the scaler resumes normal operation. Check `MAX_HOST_RAM_ALLOCATION_PERCENT` in `.env` if you want to adjust the threshold.
+
+**A container was scaled down too aggressively**
+> Check if `min_ram_mb` is set correctly in `.env`. By default the dynamic baseline anchors `min_ram_mb` to the container's current allocation, preventing shrinkage below the provisioned size.
+
+---
 
 ## Acknowledgments
-This project was inspired by [fabriziosalmi/proxmox-lxc-autoscale-ml](https://github.com/fabriziosalmi/proxmox-lxc-autoscale-ml).
+Inspired by [fabriziosalmi/proxmox-lxc-autoscale-ml](https://github.com/fabriziosalmi/proxmox-lxc-autoscale-ml).

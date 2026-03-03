@@ -117,8 +117,13 @@ def train_for_entity(px_client, entity_id, entity_type, models_dir="./models"):
     y_swap = []  # LXC only; stays empty for VMs
 
     # We need 15 past data points to predict 2 points into the future.
-    # Feature vector per interval (6 features × 15 intervals = 90 total):
-    #   cpu_percent, mem_mb, disk_read_bps, disk_write_bps, net_in_bps, net_out_bps
+    # Full feature vector layout — MUST stay in sync with Predictor._build_context_features():
+    #   [0-89]   Per-interval history: cpu%, mem_mb, diskread, diskwrite, netin, netout (6 × 15)
+    #   [90-99]  Node health: host_cpu%, host_ram%, host_swap%, load_1m, load_5m, ksm,
+    #            cpu_overcommit, ram_overcommit, container_count, reserved
+    #   [100-101] Temporal: hour_of_day, day_of_week
+    #   [101-106] Deltas: Δcpu%, Δmem_mb, Δdiskread, Δdiskwrite, Δnetin, Δnetout
+    #   Total: 107 features
     PREDICTION_HORIZON = 2
     LOOKBACK = 15
 
@@ -190,14 +195,15 @@ def train_for_entity(px_client, entity_id, entity_type, models_dir="./models"):
 
     logger.info(f"Training XGBoost Regressors for {entity_type} {entity_id}...")
 
-    model_cpu = xgb.XGBRegressor(
-        n_estimators=100, learning_rate=0.1, max_depth=5, objective="reg:squarederror"
-    )
+    _xgb_params = {
+        "n_estimators": 100, "learning_rate": 0.1, "max_depth": 5,
+        "objective": "reg:squarederror",
+    }
+
+    model_cpu = xgb.XGBRegressor(**_xgb_params)
     model_cpu.fit(X_matrix, y_cpu, sample_weight=sample_weights)
 
-    model_ram = xgb.XGBRegressor(
-        n_estimators=100, learning_rate=0.1, max_depth=5, objective="reg:squarederror"
-    )
+    model_ram = xgb.XGBRegressor(**_xgb_params)
     model_ram.fit(X_matrix, y_ram, sample_weight=sample_weights)
 
     if not os.path.exists(models_dir):
@@ -209,9 +215,7 @@ def train_for_entity(px_client, entity_id, entity_type, models_dir="./models"):
 
     # Swap predictor is LXC-only (VMs manage swap inside the guest OS)
     if entity_type == "LXC" and y_swap.sum() > 0:
-        model_swap = xgb.XGBRegressor(
-            n_estimators=100, learning_rate=0.1, max_depth=5, objective="reg:squarederror"
-        )
+        model_swap = xgb.XGBRegressor(**_xgb_params)
         model_swap.fit(X_matrix, y_swap, sample_weight=sample_weights)
         model_swap.save_model(
             os.path.join(models_dir, f"{prefix}_{entity_id}_swap.json")
@@ -241,7 +245,7 @@ def run():
 
     storage.init_db()
 
-    # 2. Discover all LXCs on the node
+    # Discover and train all LXCs then all VMs on this node.
     all_lxc_ids = px_client.get_all_lxc_ids()
 
     if not all_lxc_ids:
