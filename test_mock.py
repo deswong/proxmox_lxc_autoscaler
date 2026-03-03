@@ -1,5 +1,83 @@
+import os
 import time
+import tempfile
 from predictor import Predictor
+
+
+def test_scale_event_logging():
+    """log_scale_event() writes to scale_events; get_performance_summary() aggregates correctly."""
+    import storage as st
+
+    # Use a temporary DB so this test is isolated from production data
+    with tempfile.TemporaryDirectory() as tmp:
+        original_db = st.DATABASE_PATH if hasattr(st, "DATABASE_PATH") else None
+        import config
+        original_config_db = config.DATABASE_PATH
+        config.DATABASE_PATH = os.path.join(tmp, "test.db")
+
+        # Patch storage to use the temp DB
+        st.DATABASE_PATH = config.DATABASE_PATH
+        def _tmp_conn():
+            import sqlite3 as _sq
+            c = _sq.connect(config.DATABASE_PATH)
+            c.row_factory = _sq.Row
+            return c
+        _orig_conn = st.get_db_connection
+        st.get_db_connection = _tmp_conn
+
+        st.init_db()
+
+        now = time.time()
+
+        # Log a scale_down event (RAM freed: 2048 → 1024, -1024 MB)
+        st.log_scale_event(
+            entity_id="200",
+            entity_type="LXC",
+            cpus_before=4, cpus_after=4,
+            ram_before_mb=2048.0, ram_after_mb=1024.0,
+            trigger="prediction",
+        )
+
+        # Log a scale_up event (+512 MB)
+        st.log_scale_event(
+            entity_id="201",
+            entity_type="LXC",
+            cpus_before=2, cpus_after=2,
+            ram_before_mb=512.0, ram_after_mb=1024.0,
+            trigger="prediction",
+        )
+
+        # Log a no-change event — should NOT be recorded
+        st.log_scale_event(
+            entity_id="202",
+            entity_type="LXC",
+            cpus_before=2, cpus_after=2,
+            ram_before_mb=1024.0, ram_after_mb=1024.0,
+            trigger="prediction",
+        )
+
+        summary = st.get_performance_summary(days=1)
+        ev = summary["scale_events"]
+
+        print("\nTesting Scale Event Logging:")
+        print(f"  Total events   : {ev['total']}")
+        print(f"  Scale-ups      : {ev['scale_up_count']}")
+        print(f"  Scale-downs    : {ev['scale_down_count']}")
+        print(f"  Net RAM freed  : {ev['net_ram_freed_mb']} MB")
+
+        assert ev["total"] == 2, f"Expected 2 events (no-change skipped), got {ev['total']}"
+        assert ev["scale_down_count"] == 1, "Expected 1 scale_down"
+        assert ev["scale_up_count"] == 1, "Expected 1 scale_up"
+        # net_ram_freed = -((-1024) + 512) = 512 MB freed overall
+        assert ev["net_ram_freed_mb"] == 512.0, (
+            f"Expected net 512 MB freed, got {ev['net_ram_freed_mb']}"
+        )
+
+        # Restore
+        st.get_db_connection = _orig_conn
+        st.DATABASE_PATH = original_db
+        config.DATABASE_PATH = original_config_db
+
 
 
 def test_predictor():
@@ -844,6 +922,7 @@ def test_vm_pending_config_no_change():
 
 if __name__ == "__main__":
     print("Running Mock AI Predictor Tests...")
+    test_scale_event_logging()
     test_predictor()
     test_predictor_new_metric_keys()
     test_predictor_delta_features()

@@ -1,4 +1,5 @@
 import logging
+import storage
 from config import (
     MAX_HOST_CPU_ALLOCATION_PERCENT,
     MAX_HOST_RAM_ALLOCATION_PERCENT,
@@ -245,6 +246,25 @@ class Scaler:
                 self.px.update_lxc_resources(
                     entity_id, target_cpus, target_ram, swap_mb=target_swap
                 )
+                trigger = (
+                    "host_pressure"
+                    if host_metrics.get("ram_percent", 0) > HOST_RAM_ACTIVE_SCALEDOWN_THRESHOLD
+                    else "prediction"
+                )
+                try:
+                    storage.log_scale_event(
+                        entity_id=entity_id,
+                        entity_type="LXC",
+                        cpus_before=current_metrics["allocated_cpus"],
+                        cpus_after=target_cpus,
+                        ram_before_mb=current_metrics["allocated_ram_mb"],
+                        ram_after_mb=target_ram,
+                        trigger=trigger,
+                        swap_before_mb=float(current_metrics.get("swap_mb", 0.0)),
+                        swap_after_mb=float(target_swap),
+                    )
+                except Exception as log_err:
+                    logger.debug(f"[LXC {entity_id}] Scale event log failed: {log_err}")
                 if flush_swap:
                     # Safe-flush guard: only call swapoff if RAM headroom can
                     # physically absorb the in-swap pages without triggering OOM.
@@ -352,3 +372,15 @@ class Scaler:
             f"{peak_cpu_pct:.1f}% CPU + {self.ram_buffer_percent:.0f}% headroom."
         )
         self.px.update_vm_resources(vm_id, target_cpus, target_ram)
+        try:
+            storage.log_scale_event(
+                entity_id=vm_id,
+                entity_type="VM",
+                cpus_before=float(alloc_cpus),
+                cpus_after=float(target_cpus),
+                ram_before_mb=float(alloc_ram_mb),
+                ram_after_mb=float(target_ram),
+                trigger="vm_pending_config",
+            )
+        except Exception as log_err:
+            logger.debug(f"[VM {vm_id}] Scale event log failed: {log_err}")

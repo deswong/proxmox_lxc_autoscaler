@@ -70,10 +70,185 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_pred_lxc_time ON prediction_logs(lxc_id, timestamp)
     """)
 
+    # scale_events: records every actual resource change the autoscaler makes
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scale_events (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp      REAL    NOT NULL,
+            entity_id      TEXT    NOT NULL,
+            entity_type    TEXT    NOT NULL,
+            action         TEXT    NOT NULL,
+            trigger        TEXT    NOT NULL,
+            cpus_before    REAL,
+            cpus_after     REAL,
+            ram_before_mb  REAL,
+            ram_after_mb   REAL,
+            swap_before_mb REAL,
+            swap_after_mb  REAL,
+            cpu_delta      REAL,
+            ram_delta_mb   REAL
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scale_entity_time
+        ON scale_events(entity_id, timestamp)
+    """)
+
     conn.commit()
     conn.close()
 
     _seed_initial_baselines()
+
+
+def log_scale_event(
+    entity_id: str,
+    entity_type: str,
+    cpus_before: float,
+    cpus_after: float,
+    ram_before_mb: float,
+    ram_after_mb: float,
+    trigger: str = "prediction",
+    swap_before_mb: float = 0.0,
+    swap_after_mb: float = 0.0,
+):
+    """
+    Records every actual resource change the autoscaler makes to an entity.
+
+    ``trigger`` should be one of:
+      - ``"prediction"``          — LXC live scale driven by LightGBM forecast
+      - ``"host_pressure"``       — LXC reclaim driven by host RAM/CPU stress
+      - ``"vm_pending_config"``   — VM config written for next reboot
+
+    The ``action`` column is derived automatically:
+      ``scale_up``, ``scale_down``, ``vm_pending_config``, or ``no_change``.
+    """
+    cpu_delta = cpus_after - cpus_before
+    ram_delta = ram_after_mb - ram_before_mb
+
+    if entity_type == "VM":
+        action = "vm_pending_config"
+    elif cpu_delta > 0 or ram_delta > 0:
+        action = "scale_up"
+    elif cpu_delta < 0 or ram_delta < 0:
+        action = "scale_down"
+    else:
+        return  # Nothing changed — don't clutter the log
+
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO scale_events
+            (timestamp, entity_id, entity_type, action, trigger,
+             cpus_before, cpus_after, ram_before_mb, ram_after_mb,
+             swap_before_mb, swap_after_mb, cpu_delta, ram_delta_mb)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            time.time(), str(entity_id), entity_type, action, trigger,
+            cpus_before, cpus_after, ram_before_mb, ram_after_mb,
+            swap_before_mb, swap_after_mb, cpu_delta, ram_delta,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_performance_summary(days: int = 1) -> dict:
+    """
+    Returns a structured performance report covering the last ``days`` days.
+
+    Structure::
+
+        {
+            "period_days": int,
+            "scale_events": {
+                "total": int,
+                "scale_up_count": int,
+                "scale_down_count": int,
+                "vm_pending_count": int,
+                "host_pressure_count": int,
+                "net_ram_freed_mb": float,    # positive = freed, negative = allocated
+                "net_cpu_cores_delta": float, # negative = freed cores
+            },
+            "prediction_accuracy": [
+                {"entity_id": str, "mae_cpu_pct": float, "mae_ram_mb": float, "samples": int}
+            ],
+        }
+    """
+    cutoff = time.time() - (days * 86400)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # --- Scale event summary ---
+    cursor.execute(
+        """
+        SELECT action, trigger,
+               SUM(ram_delta_mb)  AS total_ram_delta,
+               SUM(cpu_delta)     AS total_cpu_delta,
+               COUNT(*)           AS cnt
+        FROM scale_events
+        WHERE timestamp >= ?
+        GROUP BY action, trigger
+        """,
+        (cutoff,),
+    )
+    rows = cursor.fetchall()
+
+    scale_up = scale_down = vm_pending = host_pressure = 0
+    net_ram = net_cpu = 0.0
+    for r in rows:
+        if r["action"] == "scale_up":
+            scale_up += r["cnt"]
+        elif r["action"] == "scale_down":
+            scale_down += r["cnt"]
+        elif r["action"] == "vm_pending_config":
+            vm_pending += r["cnt"]
+        if r["trigger"] == "host_pressure":
+            host_pressure += r["cnt"]
+        net_ram += (r["total_ram_delta"] or 0.0)
+        net_cpu += (r["total_cpu_delta"] or 0.0)
+
+    # --- Prediction accuracy per entity ---
+    cursor.execute(
+        """
+        SELECT lxc_id,
+               AVG(ABS(predicted_cpu - ctx_actual_cpu))  AS mae_cpu,
+               AVG(ABS(predicted_ram - ctx_actual_ram))  AS mae_ram,
+               COUNT(*) AS samples
+        FROM prediction_logs
+        WHERE timestamp >= ?
+          AND ctx_actual_cpu IS NOT NULL
+          AND ctx_actual_ram IS NOT NULL
+        GROUP BY lxc_id
+        ORDER BY mae_ram DESC
+        """,
+        (cutoff,),
+    )
+    accuracy = [
+        {
+            "entity_id": r["lxc_id"],
+            "mae_cpu_pct": round(r["mae_cpu"] or 0.0, 2),
+            "mae_ram_mb":  round(r["mae_ram"]  or 0.0, 1),
+            "samples":     r["samples"],
+        }
+        for r in cursor.fetchall()
+    ]
+
+    conn.close()
+
+    return {
+        "period_days": days,
+        "scale_events": {
+            "total":              scale_up + scale_down + vm_pending,
+            "scale_up_count":     scale_up,
+            "scale_down_count":   scale_down,
+            "vm_pending_count":   vm_pending,
+            "host_pressure_count": host_pressure,
+            "net_ram_freed_mb":   round(-net_ram, 1),   # invert: negative delta = freed
+            "net_cpu_cores_delta": round(net_cpu, 2),
+        },
+        "prediction_accuracy": accuracy,
+    }
 
 
 def _migrate_add_column(cursor, table: str, column: str, col_type: str):

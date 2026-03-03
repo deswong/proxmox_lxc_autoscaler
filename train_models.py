@@ -323,6 +323,30 @@ def run():
 
     # Clean up old offline logs so the DB doesn't grow infinitely
     storage.cleanup_prediction_logs(retention_days=14)
+
+    # Emit a 24-hour performance snapshot to the training log so the operator
+    # can see savings and accuracy trends without running report.py manually.
+    try:
+        summary = storage.get_performance_summary(days=1)
+        ev = summary["scale_events"]
+        logger.info(
+            "=== 24h Performance Snapshot === "
+            f"Scale events: {ev['total']} total "
+            f"({ev['scale_up_count']} up / {ev['scale_down_count']} down / "
+            f"{ev['vm_pending_count']} VM pending). "
+            f"Net RAM freed: {ev['net_ram_freed_mb']:.0f} MB. "
+            f"Host-pressure events: {ev['host_pressure_count']}."
+        )
+        for a in summary["prediction_accuracy"]:
+            logger.info(
+                f"  Accuracy [{a['entity_id']}]: "
+                f"CPU MAE ±{a['mae_cpu_pct']:.1f}%, "
+                f"RAM MAE ±{a['mae_ram_mb']:.0f} MB  "
+                f"({a['samples']} samples)"
+            )
+    except Exception as report_err:
+        logger.warning(f"Performance summary failed: {report_err}")
+
     logger.info("Batch training complete. Service will now use the new weights.")
 
 
