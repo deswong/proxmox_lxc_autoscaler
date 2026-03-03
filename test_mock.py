@@ -725,6 +725,121 @@ def test_scaler_host_swap_safety_cap():
     assert px.last_update is not None
     assert px.last_update["cpus"] == 1, "CPU scale-up must be blocked by host swap cap"
     assert px.last_update["ram_mb"] == 1024.0, "RAM scale-up must be blocked by host swap cap"
+def test_vm_pending_config_from_rolling_peaks():
+    """14-day rolling peak data → pending config includes 30% headroom and is written."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_vm_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 30.0, "ram_percent": 50.0, "swap_percent": 2.0,
+                    "total_ram_mb": 64000, "physical_cpus": 16,
+                    "load_avg_1m": 1.0, "load_avg_5m": 0.9, "ksm_sharing_mb": 0.0}
+
+        def update_vm_resources(self, _vm_id, cpus, ram_mb):
+            self.last_vm_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    baseline  = {"min_cpus": 2, "max_cpus": 8, "min_ram_mb": 1024.0, "max_ram_mb": 16384.0}
+    predicted = {"cpu_percent": 50.0, "ram_usage_mb": 2000.0,
+                 "recent_peak_cpu": 60.0, "recent_peak_ram": 2100.0}
+    current   = {"allocated_cpus": 2, "allocated_ram_mb": 1024.0, "ram_usage_mb": 900.0,
+                 "cpu_percent": 50.0}
+    # 14-day observed peak: 3000 MB RAM / 80% CPU on 2 cores
+    rolling_peaks = {"peak_cpu_pct": 80.0, "peak_ram_mb": 3000.0, "sample_count": 1440}
+
+    scaler.apply_vm_pending_config("500", baseline, predicted, current, rolling_peaks)
+
+    print("\nTesting VM Pending Config from Rolling Peaks (3000 MB peak, 80% CPU):")
+    print(f"VM Update: {px.last_vm_update}")
+
+    # target_ram = int(3000 * 1.30) = 3900, clamped to [1024, 16384]
+    assert px.last_vm_update is not None, "Should have written a pending config"
+    assert px.last_vm_update["ram_mb"] == 3900, (
+        f"Expected 3900 MB (3000 * 1.30), got {px.last_vm_update['ram_mb']}"
+    )
+    # needed_cores = int(0.80 * 2 * 1.20) + 1 = int(1.92) + 1 = 2 -> max(2, min(2,8)) = 2
+    assert px.last_vm_update["cpus"] >= 2, "Should have at least baseline min_cpus"
+
+
+def test_vm_pending_config_bootstrap():
+    """No log data (day one) → bootstrap from ML prediction peaks, still writes config."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_vm_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 20.0, "ram_percent": 40.0, "swap_percent": 0.0,
+                    "total_ram_mb": 64000, "physical_cpus": 16,
+                    "load_avg_1m": 0.5, "load_avg_5m": 0.4, "ksm_sharing_mb": 0.0}
+
+        def update_vm_resources(self, _vm_id, cpus, ram_mb):
+            self.last_vm_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    baseline  = {"min_cpus": 1, "max_cpus": 8, "min_ram_mb": 1024.0, "max_ram_mb": 16384.0}
+    predicted = {"cpu_percent": 40.0, "ram_usage_mb": 2500.0,
+                 "recent_peak_cpu": 55.0, "recent_peak_ram": 2800.0}
+    current   = {"allocated_cpus": 4, "allocated_ram_mb": 1024.0, "ram_usage_mb": 800.0,
+                 "cpu_percent": 40.0}
+    rolling_peaks = {"peak_cpu_pct": 0.0, "peak_ram_mb": 0.0, "sample_count": 0}
+
+    scaler.apply_vm_pending_config("501", baseline, predicted, current, rolling_peaks)
+
+    print("\nTesting VM Pending Config Bootstrap (no log data, using prediction peaks):")
+    print(f"VM Update: {px.last_vm_update}")
+
+    # Bootstrap: peak_ram = max(2500, 2800) = 2800; target_ram = int(2800*1.30) = 3640
+    assert px.last_vm_update is not None, "Should bootstrap from prediction peaks"
+    assert px.last_vm_update["ram_mb"] == 3640, (
+        f"Expected 3640 MB (2800 * 1.30), got {px.last_vm_update['ram_mb']}"
+    )
+
+
+def test_vm_pending_config_no_change():
+    """Peaks don't exceed 5% delta from current allocation → no API call made."""
+    from scaler import Scaler
+
+    class MockProxmoxClient:
+        def __init__(self):
+            self.last_vm_update = None
+
+        def get_host_usage(self):
+            return {"cpu_percent": 20.0, "ram_percent": 40.0, "swap_percent": 0.0,
+                    "total_ram_mb": 64000, "physical_cpus": 16,
+                    "load_avg_1m": 0.5, "load_avg_5m": 0.4, "ksm_sharing_mb": 0.0}
+
+        def update_vm_resources(self, _vm_id, cpus, ram_mb):
+            self.last_vm_update = {"cpus": cpus, "ram_mb": ram_mb}
+
+    px = MockProxmoxClient()
+    scaler = Scaler(px)
+
+    # VM allocated 4096 MB.  Rolling peak 3000 MB -> target = int(3000*1.30) = 3900.
+    # Delta from 4096: abs(3900 - 4096) / 4096 * 100 = 4.8% < 5% -> no write.
+    baseline  = {"min_cpus": 4, "max_cpus": 8, "min_ram_mb": 1024.0, "max_ram_mb": 16384.0}
+    predicted = {"cpu_percent": 50.0, "ram_usage_mb": 2900.0,
+                 "recent_peak_cpu": 55.0, "recent_peak_ram": 3000.0}
+    current   = {"allocated_cpus": 4, "allocated_ram_mb": 4096.0, "ram_usage_mb": 2900.0,
+                 "cpu_percent": 50.0}
+    rolling_peaks = {"peak_cpu_pct": 60.0, "peak_ram_mb": 3000.0, "sample_count": 500}
+
+    scaler.apply_vm_pending_config("502", baseline, predicted, current, rolling_peaks)
+
+    print("\nTesting VM Pending Config No-Change (4.8% delta < 5% threshold):")
+    print(f"VM Update: {px.last_vm_update}")
+
+    assert px.last_vm_update is None, (
+        "Should NOT write config when change is < 5% (avoids micro-updates every cycle)"
+    )
 
 
 if __name__ == "__main__":
@@ -744,4 +859,8 @@ if __name__ == "__main__":
     test_scaler_host_pressure_active_scaledown()
     test_scaler_host_pressure_busy_container_protected()
     test_scaler_host_swap_safety_cap()
+    test_vm_pending_config_from_rolling_peaks()
+    test_vm_pending_config_bootstrap()
+    test_vm_pending_config_no_change()
     print("All mock tests passed!")
+

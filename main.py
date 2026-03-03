@@ -260,9 +260,13 @@ def run():
                         f"[VM {vm_id}] Failed to log prediction for reinforcement learning: {db_err}"
                     )
 
-                # Evaluate and emit scaling decisions
-                scaler.evaluate_and_scale(
-                    vm_id, "VM", baseline, predicted_usage, current_metrics
+                # Compute optimal next-reboot sizing from 14-day rolling peak.
+                # No live hotplug is attempted for VMs — the config is written as
+                # a pending Proxmox entry that takes effect on the next reboot,
+                # ensuring the VM always has headroom without risking guest OS crashes.
+                rolling_peaks = storage.get_vm_rolling_peaks(vm_id)
+                scaler.apply_vm_pending_config(
+                    vm_id, baseline, predicted_usage, current_metrics, rolling_peaks
                 )
 
             except Exception as e:

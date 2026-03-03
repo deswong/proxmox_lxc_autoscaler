@@ -289,3 +289,91 @@ class Scaler:
             logger.debug(
                 f"[{entity_type} {entity_id}] Resources adequate, no significant scaling required."
             )
+
+    def apply_vm_pending_config(
+        self,
+        vm_id: str,
+        baseline: dict,
+        predicted: dict,
+        current_metrics: dict,
+        rolling_peaks: dict,
+    ):
+        """
+        Computes the optimal CPU / RAM sizing for a VM using a 14-day rolling peak
+        from the telemetry log plus a 30% safety headroom, then writes that as a
+        *pending* Proxmox config entry. The change takes effect on the next reboot—
+        no live hotplug is ever attempted.
+
+        Sizing formula
+        --------------
+        peak_ram_mb  = MAX(rolling 14-day observed RAM, prediction recent_peak)
+        peak_cpu_pct = MAX(rolling 14-day observed CPU%, prediction recent_peak_cpu)
+
+        target_ram   = clamp(int(peak_ram * 1.30), max(min_ram_mb, 1024), max_ram_mb)
+        needed_cores = int(peak_cpu_pct / 100 x current_cpus x 1.30) + 1
+        target_cpus  = clamp(needed_cores, min_cpus, max_cpus)
+
+        Config is only written when recommendation differs from current allocation
+        by > 5% RAM or >= 1 CPU core.
+        """
+        if not current_metrics:
+            logger.warning(f"[VM {vm_id}] No current metrics. Skipping pending config.")
+            return
+
+        sample_count = rolling_peaks.get("sample_count", 0)
+        alloc_cpus   = current_metrics["allocated_cpus"]
+        alloc_ram_mb = current_metrics["allocated_ram_mb"]
+
+        if sample_count > 0:
+            # Primary path: real observed peaks from the telemetry log
+            peak_ram_mb  = rolling_peaks["peak_ram_mb"]
+            peak_cpu_pct = rolling_peaks["peak_cpu_pct"]
+            source_label = f"{sample_count} telemetry samples"
+        else:
+            # Bootstrap: no log data yet (day one). Use the ML prediction peaks.
+            peak_ram_mb  = max(
+                predicted["ram_usage_mb"],
+                predicted.get("recent_peak_ram", 0.0),
+            )
+            peak_cpu_pct = max(
+                predicted["cpu_percent"],
+                predicted.get("recent_peak_cpu", 0.0),
+            )
+            source_label = "ML prediction peaks (no log data yet)"
+
+        logger.info(
+            f"[VM {vm_id}] Rolling peaks ({source_label}): "
+            f"{peak_ram_mb:.0f} MB RAM / {peak_cpu_pct:.1f}% CPU"
+        )
+
+        # Apply 30% headroom above peak
+        headroom   = 1 + self.ram_buffer_percent / 100.0
+        target_ram = int(peak_ram_mb * headroom)
+        target_ram = max(target_ram, 1024)              # Proxmox VM floor
+        target_ram = max(target_ram, baseline["min_ram_mb"])
+        target_ram = min(target_ram, baseline["max_ram_mb"])
+
+        needed_cores = int(
+            (peak_cpu_pct / 100.0) * alloc_cpus * (1 + self.cpu_buffer_percent / 100.0)
+        ) + 1  # +1 ensures at least one core always recommended
+        target_cpus = max(baseline["min_cpus"], min(needed_cores, baseline["max_cpus"]))
+
+        # Only write when change is significant (> 5% RAM or CPU core count changes)
+        ram_delta_pct = abs(target_ram - alloc_ram_mb) / max(alloc_ram_mb, 1) * 100
+        cpu_changed   = target_cpus != alloc_cpus
+
+        if ram_delta_pct < 5.0 and not cpu_changed:
+            logger.debug(
+                f"[VM {vm_id}] Pending config unchanged "
+                f"(delta {ram_delta_pct:.1f}% RAM, CPU same). Skipping write."
+            )
+            return
+
+        logger.info(
+            f"[VM {vm_id}] PENDING CONFIG (applies on next reboot): "
+            f"{target_cpus} CPUs (was {alloc_cpus}), "
+            f"{target_ram} MB RAM (was {alloc_ram_mb:.0f} MB). "
+            f"Basis: {source_label} — 14-day peak {peak_ram_mb:.0f} MB / "
+            f"{peak_cpu_pct:.1f}% CPU + {self.ram_buffer_percent:.0f}% headroom."
+        )
+        self.px.update_vm_resources(vm_id, target_cpus, target_ram)

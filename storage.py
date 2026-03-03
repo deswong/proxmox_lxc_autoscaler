@@ -204,6 +204,47 @@ def log_prediction(
     conn.close()
 
 
+def get_vm_rolling_peaks(entity_id: str, days: int = 14) -> dict:
+    """
+    Returns the rolling maximum CPU% and RAM usage observed for a VM/LXC over
+    the last ``days`` days from the prediction_logs telemetry table.
+
+    Uses the ``ctx_actual_cpu`` and ``ctx_actual_ram`` columns written by the live
+    daemon every cycle, so the peaks reflect what the entity *actually* used —
+    not just what the ML model predicted.
+
+    Returns:
+        {
+            "peak_cpu_pct": float,   # highest observed CPU%  (0 if no data)
+            "peak_ram_mb":  float,   # highest observed RAM MB (0 if no data)
+            "sample_count": int,     # rows found; 0 means bootstrap from prediction peaks
+        }
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cutoff = time.time() - (days * 86400)
+    cursor.execute(
+        """
+        SELECT MAX(ctx_actual_cpu) AS peak_cpu,
+               MAX(ctx_actual_ram) AS peak_ram,
+               COUNT(*)            AS samples
+        FROM prediction_logs
+        WHERE lxc_id = ? AND timestamp >= ?
+        """,
+        (str(entity_id), cutoff),
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row["samples"]:
+        return {
+            "peak_cpu_pct": float(row["peak_cpu"] or 0.0),
+            "peak_ram_mb":  float(row["peak_ram"] or 0.0),
+            "sample_count": int(row["samples"]),
+        }
+    return {"peak_cpu_pct": 0.0, "peak_ram_mb": 0.0, "sample_count": 0}
+
+
 def cleanup_prediction_logs(retention_days=14):
     """
     Prunes prediction logs older than the retention period to stop the SQLite file

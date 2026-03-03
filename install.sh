@@ -95,6 +95,36 @@ else
     echo "✅ Nightly training configured for 3:00 AM."
 fi
 
+# 8. Offer Host Kernel Swappiness Tuning
+CURRENT_SWAPPINESS=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+if [ "$CURRENT_SWAPPINESS" -eq 1 ]; then
+    echo "✅ Host kernel already tuned (vm.swappiness=1). Skipping."
+else
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  💡 Recommended: Host Kernel Swappiness Tuning"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "  Your host kernel is currently set to vm.swappiness=$CURRENT_SWAPPINESS."
+    echo "  The Linux default (60) eagerly moves idle memory pages to the swap disk"
+    echo "  even when physical RAM is available, causing unnecessary I/O on your"
+    echo "  Proxmox hypervisor. For a host running ML-driven autoscaling, this"
+    echo "  interferes with the autoscaler's own swap management for containers."
+    echo ""
+    echo "  Setting vm.swappiness=1 tells the kernel to only use swap as an absolute"
+    echo "  last resort, keeping your RAM available for containers and reducing disk I/O."
+    echo ""
+    read -r -p "  Apply optimised kernel settings now? (vm.swappiness=1, vm.vfs_cache_pressure=50) [Y/n]: " TUNE_SWAP
+    TUNE_SWAP="${TUNE_SWAP:-Y}"
+    if [[ "$TUNE_SWAP" =~ ^[Yy]$ ]]; then
+        bash "${APP_DIR}/tools/tune_host_swappiness.sh"
+        echo "✅ Host kernel tuned for optimal autoscaler performance."
+    else
+        echo "⏭️  Skipped. You can apply this later:"
+        echo "   sudo bash ${APP_DIR}/tools/tune_host_swappiness.sh"
+    fi
+fi
+
 echo ""
 echo "🎉 Installation Complete!"
 echo "--------------------------------------------------------"
