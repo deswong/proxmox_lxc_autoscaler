@@ -256,14 +256,28 @@ class Scaler:
         #    during the model cold-start period.
         if entity_type == "LXC":
             if flush_swap:
-                # Stepped Reduction: don't drop to SWAP_DRAIN_MB immediately if swap_alloc is large.
-                # Reclaim in chunks of SWAP_STEP_REDUCTION_MB to avoid IO storms.
+                # 5a. Stepped Reduction & Saturated Flush "Rescue"
                 current_swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
-                target_swap = max(SWAP_DRAIN_MB, int(current_swap_alloc - SWAP_STEP_REDUCTION_MB))
-                if target_swap != current_swap_alloc:
-                    logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
+                
+                if swap_used > (current_swap_alloc + 2):
+                    # DETECTED STALL: The container is using more swap than it is allocated.
+                    # This happens if a flush was triggered but the kernel couldn't clear it.
+                    # Rescue: expand the cap to usage + 32MB to clear the 'N/A' error state,
+                    # which allows the next cycle's stepped reduction to function.
+                    target_swap = int(swap_used + 32)
+                    logger.warning(
+                        f"[LXC {entity_id}] SWAP STALL DETECTED: Used ({swap_used:.0f} MB) > "
+                        f"Allocated ({current_swap_alloc:.0f} MB). Expanding cap to {target_swap} MB to rescue."
+                    )
                 else:
-                    logger.debug(f"[LXC {entity_id}] Maintaining swap cap ({target_swap} MB) for flush.")
+                    # Normal Stepped Reduction: don't drop to SWAP_DRAIN_MB immediately.
+                    # Reclaim in chunks of SWAP_STEP_REDUCTION_MB to avoid IO storms.
+                    target_swap = max(SWAP_DRAIN_MB, int(current_swap_alloc - SWAP_STEP_REDUCTION_MB))
+                    
+                    if target_swap != current_swap_alloc:
+                        logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
+                    else:
+                        logger.debug(f"[LXC {entity_id}] Maintaining swap cap ({target_swap} MB) for flush.")
             elif swap_is_draining:
                 target_swap = max(SWAP_DRAIN_MB, current_metrics.get("allocated_swap_mb", 0.0))
                 logger.info(
