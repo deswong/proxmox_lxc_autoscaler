@@ -85,8 +85,12 @@ class Scaler:
         )
 
         # 2. Bound against configured baselines (min/max for this entity)
+        # Apply a hard system floor (64MB LXC, 1024MB VM) to prevent OS crashes
+        system_floor = 64 if entity_type == "LXC" else 1024
         target_ram = max(
-            baseline["min_ram_mb"], min(int(desired_ram_mb), baseline["max_ram_mb"])
+            baseline["min_ram_mb"],
+            system_floor,
+            min(int(desired_ram_mb), baseline["max_ram_mb"]),
         )
         target_cpus = max(baseline["min_cpus"], min(desired_cpus, baseline["max_cpus"]))
 
@@ -204,7 +208,7 @@ class Scaler:
                 target_swap = max(SWAP_DRAIN_MB, int(current_swap_alloc - SWAP_STEP_REDUCTION_MB))
                 logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
             elif swap_is_draining:
-                target_swap = current_metrics.get("allocated_swap_mb", 0.0)  # Maintain current drain cap
+                target_swap = max(SWAP_DRAIN_MB, current_metrics.get("allocated_swap_mb", 0.0))
             elif LXC_TARGET_SWAP_MB == -1:
                 peak_swap = max(
                     predicted.get("predicted_swap_mb", 0.0),
