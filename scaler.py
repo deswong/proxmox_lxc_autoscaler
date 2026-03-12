@@ -55,13 +55,50 @@ class Scaler:
             )
             return
 
+        # 0. Pre-calculate swap status (Needed for RAM headroom planning)
+        flush_swap = False
+        swap_is_draining = False
+        swap_used = 0.0
+        swap_alloc = 0.0
+
+        if entity_type == "LXC":
+            swap_used = current_metrics.get("swap_mb", 0.0)
+            swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
+            
+            # Flush required if swap usage exceeds threshold percentage
+            if swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
+                # Safe-flush guard: only trigger if RAM headroom can absorb swap
+                ram_usage = current_metrics.get("ram_usage_mb", 0.0)
+                alloc_ram = current_metrics["allocated_ram_mb"]
+                ram_headroom = alloc_ram - ram_usage
+                if ram_headroom >= swap_used * 1.1:
+                    flush_swap = True
+            
+            # Active drain state: cap is already at/near floor, but swap is still clearing
+            if swap_alloc <= SWAP_DRAIN_MB and swap_used > 5:
+                swap_is_draining = True
+
         # 1. Calculate the raw desired resources from the predictor.
-        #    Use the higher of the ML forecast or the observed recent peak so
-        #    that genuine RAM spikes are covered, not just the smoothed average.
-        #    Then apply an overhead buffer on top of that peak value.
+        #    Use the higher of the ML forecast, the observed recent peak, or 
+        #    the current actual usage to ensure we never under-allocate.
+        current_usage_mb = current_metrics.get("ram_usage_mb", 0.0)
         peak_ram_mb = max(
-            predicted["ram_usage_mb"], predicted.get("recent_peak_ram", 0.0)
+            predicted["ram_usage_mb"], 
+            predicted.get("recent_peak_ram", 0.0),
+            current_usage_mb
         )
+
+        # If we are draining swap, we MUST increase RAM headroom to allow the drain to finish.
+        # Without this, the kernel will 'trickle' swap in very slowly as RAM is tightly capped.
+        if swap_is_draining or flush_swap:
+            needed_for_swap = (current_usage_mb + swap_used) * 1.15
+            if peak_ram_mb < needed_for_swap:
+                logger.debug(
+                    f"[{entity_type} {entity_id}] Boosting RAM target to {needed_for_swap:.0f} MB "
+                    f"to absorb swap ({swap_used:.0f} MB remaining)."
+                )
+                peak_ram_mb = needed_for_swap
+
         desired_ram_mb = peak_ram_mb * (1 + self.ram_buffer_percent / 100.0)
 
         # CPU scaling heuristic - proportional to the predicted load:
@@ -92,7 +129,23 @@ class Scaler:
             system_floor,
             min(int(desired_ram_mb), baseline["max_ram_mb"]),
         )
+
+        # Final Guard: If we are draining swap, ensure we don't scale RAM down below 
+        # what is physically needed to absorb the swap, otherwise the kernel stalls.
+        if (swap_is_draining or flush_swap) and entity_type == "LXC":
+            target_ram = max(target_ram, int(current_usage_mb + swap_used + 64))
+
         target_cpus = max(baseline["min_cpus"], min(desired_cpus, baseline["max_cpus"]))
+
+        # 2b. Re-evaluate flush_swap based on TARGET ram headroom
+        # If we didn't trigger a flush because of low current headroom, check if the 
+        # NEW target RAM we're about to apply provides enough space.
+        if entity_type == "LXC" and not flush_swap:
+            target_headroom = target_ram - current_usage_mb
+            # Trigger if target headroom is > swap used + 10% safety buffer
+            if target_headroom >= swap_used * 1.1 and swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
+                flush_swap = True
+                logger.info(f"[LXC {entity_id}] Target RAM scaling to {target_ram} MB unlocks enough headroom ({target_headroom:.0f} MB) for swap flush.")
 
         # 3. Check physical node limits before scaling UP
         # Fetch live host node metrics
@@ -206,9 +259,16 @@ class Scaler:
                 # Reclaim in chunks of SWAP_STEP_REDUCTION_MB to avoid IO storms.
                 current_swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
                 target_swap = max(SWAP_DRAIN_MB, int(current_swap_alloc - SWAP_STEP_REDUCTION_MB))
-                logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
+                if target_swap != current_swap_alloc:
+                    logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
+                else:
+                    logger.debug(f"[LXC {entity_id}] Maintaining swap cap ({target_swap} MB) for flush.")
             elif swap_is_draining:
                 target_swap = max(SWAP_DRAIN_MB, current_metrics.get("allocated_swap_mb", 0.0))
+                logger.info(
+                    f"[LXC {entity_id}] Swap is actively draining to RAM ({swap_used:.0f} MB remaining). "
+                    f"Maintaining drain cap ({target_swap} MB) until clear."
+                )
             elif LXC_TARGET_SWAP_MB == -1:
                 peak_swap = max(
                     predicted.get("predicted_swap_mb", 0.0),
@@ -278,18 +338,7 @@ class Scaler:
                 except Exception as log_err:
                     logger.debug(f"[LXC {entity_id}] Scale event log failed: {log_err}")
                 if flush_swap:
-                    # Safe-flush guard: only call swapoff if RAM headroom can
-                    # physically absorb the in-swap pages without triggering OOM.
-                    ram_headroom = target_ram - current_metrics.get("ram_usage_mb", 0.0)
-                    swap_used = current_metrics.get("swap_mb", 0.0)
-                    if ram_headroom >= swap_used * 1.1:
-                        self.px.flush_lxc_swap(entity_id)
-                    else:
-                        logger.warning(
-                            f"[LXC {entity_id}] Skipping swap flush: insufficient RAM headroom "
-                            f"({ram_headroom:.0f} MB available, {swap_used:.0f} MB in swap). "
-                            "Will retry after RAM scales up further."
-                        )
+                    self.px.flush_lxc_swap(entity_id)
             elif entity_type == "VM":
                 self.px.update_vm_resources(entity_id, target_cpus, target_ram)
         else:
