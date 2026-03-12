@@ -115,9 +115,9 @@ def run():
                     # scaler never shrinks a container below its provisioned size.
                     baseline = {
                         "min_cpus": 1,
-                        "min_ram_mb": current_metrics["allocated_ram_mb"],
+                        "min_ram_mb": max(128, int(current_metrics["allocated_ram_mb"])),
                         "max_cpus": current_metrics["allocated_cpus"] + 4,
-                        "max_ram_mb": current_metrics["allocated_ram_mb"] * 2,
+                        "max_ram_mb": max(256, int(current_metrics["allocated_ram_mb"] * 2)),
                     }
                     logger.debug(
                         f"[LXC {lxc_id}] Using dynamic fallback baseline: {baseline}"

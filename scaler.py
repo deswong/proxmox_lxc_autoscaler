@@ -132,8 +132,14 @@ class Scaler:
 
         # Final Guard: If we are draining swap, ensure we don't scale RAM down below 
         # what is physically needed to absorb the swap, otherwise the kernel stalls.
+        # Priority 1: Ensure enough headroom (usage + swap).
+        # Priority 2: Don't scale DOWN if swap is flushing (even if prediction says to).
         if (swap_is_draining or flush_swap) and entity_type == "LXC":
-            target_ram = max(target_ram, int(current_usage_mb + swap_used + 64))
+            # Ensure physical capacity for pages
+            target_ram = max(target_ram, int(current_usage_mb + swap_used + 128))
+            # Prevent scale-down unless host is in emergency state (>95%)
+            if host_ram_pct < 95.0:
+                target_ram = max(target_ram, int(current_metrics["allocated_ram_mb"]))
 
         target_cpus = max(baseline["min_cpus"], min(desired_cpus, baseline["max_cpus"]))
 
@@ -226,15 +232,9 @@ class Scaler:
                     )
                     target_ram = reclaimed_target
 
-        # 4. Detect swap saturation on LXCs and schedule a post-scale flush.
-        #    High swap means the container is IO-bound on disk; flushing it
-        #    after a RAM scale-up reclaims pages back into the newly freed RAM.
-        flush_swap = False
-        swap_is_draining = False
         if entity_type == "LXC":
-            swap_used = current_metrics.get("swap_mb", 0.0)
-            swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
-            if swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
+            # (Logic already pre-calculated at top of function)
+            if flush_swap:
                 logger.warning(
                     f"[LXC {entity_id}] Swap saturation detected "
                     f"({swap_used:.0f}/{swap_alloc:.0f} MB used). "
