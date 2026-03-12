@@ -81,6 +81,14 @@ def print_report(days: int = 1):
     else:
         print("  │  Net CPU change : 0 cores")
 
+    net_swap = ev["net_swap_freed_mb"]
+    if net_swap > 0:
+        print(f"  │  Net Swap freed : {net_swap:.0f} MB")
+    elif net_swap < 0:
+        print(f"  │  Net Swap added : {-net_swap:.0f} MB")
+    else:
+        print("  │  Net Swap change: 0 MB")
+
     if ev["vm_pending_count"] > 0:
         print("  │")
         print("  ├─ Potential Savings (Pending Reboot - VM) ───────────")

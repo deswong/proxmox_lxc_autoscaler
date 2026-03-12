@@ -62,8 +62,14 @@ def init_db():
     _migrate_add_column(cursor, "prediction_logs", "ctx_cpu_overcommit", "REAL DEFAULT 0.0")
     _migrate_add_column(cursor, "prediction_logs", "ctx_ram_overcommit", "REAL DEFAULT 0.0")
     _migrate_add_column(cursor, "prediction_logs", "ctx_container_count", "INTEGER DEFAULT 0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_ksm_sharing_mb", "REAL DEFAULT 0.0")
     _migrate_add_column(cursor, "prediction_logs", "ctx_actual_cpu", "REAL DEFAULT 0.0")
     _migrate_add_column(cursor, "prediction_logs", "ctx_actual_ram", "REAL DEFAULT 0.0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_actual_swap", "REAL DEFAULT 0.0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_min_cpus", "INTEGER DEFAULT 0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_max_cpus", "INTEGER DEFAULT 0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_min_ram", "INTEGER DEFAULT 0")
+    _migrate_add_column(cursor, "prediction_logs", "ctx_max_ram", "INTEGER DEFAULT 0")
 
     # Create an index for faster time-series querying during batch training
     cursor.execute("""
@@ -169,6 +175,7 @@ def get_performance_summary(days: int = 1) -> dict:
                 "host_pressure_count": int,
                 "net_ram_freed_mb": float,    # positive = freed, negative = allocated
                 "net_cpu_cores_delta": float, # negative = freed cores
+                "net_swap_freed_mb": float,   # positive = freed
             },
             "prediction_accuracy": [
                 {"entity_id": str, "mae_cpu_pct": float, "mae_ram_mb": float, "samples": int}
@@ -195,7 +202,7 @@ def get_performance_summary(days: int = 1) -> dict:
     rows = cursor.fetchall()
 
     scale_up = scale_down = vm_pending = host_pressure = 0
-    net_ram = net_cpu = 0.0
+    net_ram = net_cpu = net_swap = 0.0
     potential_ram = potential_cpu = 0.0
 
     for r in rows:
@@ -214,6 +221,22 @@ def get_performance_summary(days: int = 1) -> dict:
 
         if r["trigger"] == "host_pressure":
             host_pressure += r["cnt"]
+        
+        # Track swap delta for scale events
+        net_swap += (r["swap_before_mb"] - r["swap_after_mb"]) if r["swap_before_mb"] is not None else 0.0
+
+    # --- Swap Trend Analysis (Natural Reclaim progress) ---
+    # We look at the first and last swap reading in the period to see if usage dropped
+    cursor.execute(
+        """
+        SELECT SUM(swap_before_mb - swap_after_mb) as total_swap_delta
+        FROM scale_events
+        WHERE timestamp >= ? AND entity_type = 'LXC'
+        """,
+        (cutoff,),
+    )
+    res = cursor.fetchone()
+    net_swap = res["total_swap_delta"] if res and res["total_swap_delta"] is not None else 0.0
 
     # --- Prediction accuracy per entity ---
     cursor.execute(
@@ -253,6 +276,7 @@ def get_performance_summary(days: int = 1) -> dict:
             "host_pressure_count": host_pressure,
             "net_ram_freed_mb":   round(-net_ram, 1),
             "net_cpu_cores_delta": round(net_cpu, 2),
+            "net_swap_freed_mb":  round(net_swap, 1),
             "potential_ram_freed_mb": round(-potential_ram, 1),
             "potential_cpu_cores_delta": round(potential_cpu, 2),
         },
@@ -352,8 +376,14 @@ def log_prediction(
     ctx_cpu_overcommit: float = 0.0,
     ctx_ram_overcommit: float = 0.0,
     ctx_container_count: int = 0,
+    ctx_ksm_sharing_mb: float = 0.0,
     ctx_actual_cpu: float = 0.0,
     ctx_actual_ram: float = 0.0,
+    ctx_actual_swap: float = 0.0,
+    ctx_min_cpus: int = 0,
+    ctx_max_cpus: int = 0,
+    ctx_min_ram: int = 0,
+    ctx_max_ram: int = 0,
 ):
     """
     Saves a prediction to the database along with the full environment context
@@ -371,16 +401,18 @@ def log_prediction(
             pred_disk_read, pred_disk_write, pred_net_in, pred_net_out,
             ctx_hour, ctx_dow, ctx_host_load_1m, ctx_host_load_5m,
             ctx_cpu_overcommit, ctx_ram_overcommit, ctx_container_count,
-            ctx_actual_cpu, ctx_actual_ram
+            ctx_ksm_sharing_mb, ctx_actual_cpu, ctx_actual_ram, ctx_actual_swap,
+            ctx_min_cpus, ctx_max_cpus, ctx_min_ram, ctx_max_ram
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """,
         (
             str(lxc_id), current_time, predicted_cpu, predicted_ram, predicted_swap,
             pred_disk_read, pred_disk_write, pred_net_in, pred_net_out,
             ctx_hour, ctx_dow, ctx_host_load_1m, ctx_host_load_5m,
             ctx_cpu_overcommit, ctx_ram_overcommit, ctx_container_count,
-            ctx_actual_cpu, ctx_actual_ram,
+            ctx_ksm_sharing_mb, ctx_actual_cpu, ctx_actual_ram, ctx_actual_swap,
+            ctx_min_cpus, ctx_max_cpus, ctx_min_ram, ctx_max_ram
         ),
     )
 

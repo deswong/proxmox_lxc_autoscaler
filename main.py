@@ -154,8 +154,14 @@ def run():
                         ctx_cpu_overcommit=host_metrics.get("cpu_overcommit_ratio", 0.0),
                         ctx_ram_overcommit=host_metrics.get("ram_overcommit_ratio", 0.0),
                         ctx_container_count=int(host_metrics.get("container_count", 0)),
+                        ctx_ksm_sharing_mb=host_metrics.get("ksm_sharing_mb", 0.0),
                         ctx_actual_cpu=current_metrics.get("cpu_percent", 0.0),
                         ctx_actual_ram=current_metrics.get("ram_usage_mb", 0.0),
+                        ctx_actual_swap=current_metrics.get("swap_mb", 0.0),
+                        ctx_min_cpus=baseline.get("min_cpus", 0),
+                        ctx_max_cpus=baseline.get("max_cpus", 0),
+                        ctx_min_ram=baseline.get("min_ram_mb", 0),
+                        ctx_max_ram=baseline.get("max_ram_mb", 0),
                     )
                 except Exception as db_err:
                     logger.warning(
