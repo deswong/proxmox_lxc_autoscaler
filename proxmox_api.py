@@ -8,7 +8,6 @@ from config import (
     PROXMOX_TOKEN_ID,
     PROXMOX_TOKEN_SECRET,
     NODE_NAME,
-    SWAP_DRAIN_MB,
 )
 
 # Suppress insecure request warnings if Proxmox uses self-signed certs
@@ -118,26 +117,6 @@ class ProxmoxClient:
                     time.sleep(2**attempt)
                 else:
                     return False
-
-    def flush_lxc_swap(self, lxc_id: str, target_mb: int = None) -> bool:
-        """
-        Flushes active swap for an LXC by dropping its swap cap via
-        the Proxmox API. This forces the host kernel to reclaim the swap pages
-        into RAM.
-        """
-        if not self.proxmox:
-            return False
-
-        if target_mb is None:
-            target_mb = SWAP_DRAIN_MB
-
-        try:
-            self.node.lxc(lxc_id).config.put(swap=target_mb)
-            logger.info(f"[LXC {lxc_id}] Swap flush triggered via API (swap cap set to {target_mb} MB).")
-            return True
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error(f"[LXC {lxc_id}] Unexpected error dropping swap cap to flush: {exc}")
-            return False
 
     def get_lxc_rrd_history(self, lxc_id: str, timeframe: str = "hour") -> list:
         """

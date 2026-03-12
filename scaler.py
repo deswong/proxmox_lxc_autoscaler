@@ -6,9 +6,6 @@ from config import (
     MAX_HOST_SWAP_USAGE_PERCENT,
     LXC_TARGET_SWAP_MB,
     LXC_MIN_SWAP_MB,
-    SWAP_FLUSH_THRESHOLD_PERCENT,
-    SWAP_DRAIN_MB,
-    SWAP_STEP_REDUCTION_MB,
 )
 from proxmox_api import ProxmoxClient
 
@@ -67,27 +64,12 @@ class Scaler:
         safe_swap_limit = min(MAX_HOST_SWAP_USAGE_PERCENT, 95.0)
 
         # 0. Pre-calculate swap status (Needed for RAM headroom planning)
-        flush_swap = False
-        swap_is_draining = False
         swap_used = 0.0
         swap_alloc = 0.0
 
         if entity_type == "LXC":
             swap_used = current_metrics.get("swap_mb", 0.0)
             swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
-            
-            # Flush required if swap usage exceeds threshold percentage
-            if swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
-                # Safe-flush guard: only trigger if RAM headroom can absorb swap
-                ram_usage = current_metrics.get("ram_usage_mb", 0.0)
-                alloc_ram = current_metrics["allocated_ram_mb"]
-                ram_headroom = alloc_ram - ram_usage
-                if ram_headroom >= swap_used * 1.1:
-                    flush_swap = True
-            
-            # Active drain state: cap is already at/near floor, but swap is still clearing
-            if swap_alloc <= SWAP_DRAIN_MB and swap_used > 5:
-                swap_is_draining = True
 
         # 1. Calculate the raw desired resources from the predictor.
         #    Use the higher of the ML forecast, the observed recent peak, or 
@@ -99,14 +81,15 @@ class Scaler:
             current_usage_mb
         )
 
-        # If we are draining swap, we MUST increase RAM headroom to allow the drain to finish.
-        # Without this, the kernel will 'trickle' swap in very slowly as RAM is tightly capped.
-        if swap_is_draining or flush_swap:
+        # "Natural Reclaim" RAM Boost: If the container is actively using swap, we
+        # MUST increase its RAM headroom to give the OS enough physical space
+        # to naturally page those swap blocks back into RAM on its own schedule.
+        if swap_used > 5 and entity_type == "LXC":
             needed_for_swap = (current_usage_mb + swap_used) * 1.15
             if peak_ram_mb < needed_for_swap:
                 logger.debug(
-                    f"[{entity_type} {entity_id}] Boosting RAM target to {needed_for_swap:.0f} MB "
-                    f"to absorb swap ({swap_used:.0f} MB remaining)."
+                    f"[{entity_type} {entity_id}] Boosting target RAM to {needed_for_swap:.0f} MB "
+                    f"to allow natural reclaim of {swap_used:.0f} MB swap."
                 )
                 peak_ram_mb = needed_for_swap
 
@@ -141,11 +124,9 @@ class Scaler:
             min(int(desired_ram_mb), baseline["max_ram_mb"]),
         )
 
-        # Final Guard: If we are draining swap, ensure we don't scale RAM down below 
-        # what is physically needed to absorb the swap, otherwise the kernel stalls.
+        # Final Guard: Ensure we never shrink RAM if container is heavily swapped
         # Priority 1: Ensure enough headroom (usage + swap).
-        # Priority 2: Don't scale DOWN if swap is flushing (even if prediction says to).
-        if (swap_is_draining or flush_swap) and entity_type == "LXC":
+        if swap_used > 5 and entity_type == "LXC":
             # Ensure physical capacity for pages
             target_ram = max(target_ram, int(current_usage_mb + swap_used + 128))
             # Prevent scale-down unless host is in emergency state (>95%)
@@ -153,16 +134,6 @@ class Scaler:
                 target_ram = max(target_ram, int(current_metrics["allocated_ram_mb"]))
 
         target_cpus = max(baseline["min_cpus"], min(desired_cpus, baseline["max_cpus"]))
-
-        # 2b. Re-evaluate flush_swap based on TARGET ram headroom
-        # If we didn't trigger a flush because of low current headroom, check if the 
-        # NEW target RAM we're about to apply provides enough space.
-        if entity_type == "LXC" and not flush_swap:
-            target_headroom = target_ram - current_usage_mb
-            # Trigger if target headroom is > swap used + 10% safety buffer
-            if target_headroom >= swap_used * 1.1 and swap_alloc > 0 and (swap_used / swap_alloc * 100) > SWAP_FLUSH_THRESHOLD_PERCENT:
-                flush_swap = True
-                logger.info(f"[LXC {entity_id}] Target RAM scaling to {target_ram} MB unlocks enough headroom ({target_headroom:.0f} MB) for swap flush.")
 
         # 3. Check physical node limits before scaling UP
         # Hardcoded emergency safeguard (caps user config at max 95%)
@@ -234,44 +205,18 @@ class Scaler:
                     target_ram = reclaimed_target
 
         if entity_type == "LXC":
-            # (Logic already pre-calculated at top of function)
-            if flush_swap:
-                logger.warning(
-                    f"[LXC {entity_id}] Swap saturation detected "
-                    f"({swap_used:.0f}/{swap_alloc:.0f} MB used). "
-                    "Will flush swap after scale-up."
-                )
-                flush_swap = True
-            elif swap_alloc <= SWAP_DRAIN_MB and swap_used > (SWAP_DRAIN_MB + 2):
-                # The container's cap is at or below drain limit, meaning it is actively draining
+            if swap_used > 5:
                 logger.info(
-                    f"[LXC {entity_id}] Swap is actively draining to RAM "
-                    f"({swap_used:.0f} MB remaining). Maintaining drain cap ({swap_alloc:.0f} MB) until clear."
+                    f"[LXC {entity_id}] Natural Reclaim active ({swap_used:.0f}/{swap_alloc:.0f} MB used). "
+                    "Waiting for OS to page back to RAM."
                 )
-                swap_is_draining = True
 
         # 5. Compute the target swap cap for this LXC.
         #    Auto mode (-1): size swap like RAM — use observed peak + 30% buffer,
         #    floored at LXC_MIN_SWAP_MB so no container is ever left fully swapless
         #    during the model cold-start period.
         if entity_type == "LXC":
-            if flush_swap:
-                # 5a. Stepped Reduction (Pressure Kernel to Clear Swap)
-                # Reclaim in chunks of SWAP_STEP_REDUCTION_MB to avoid IO storms.
-                current_swap_alloc = current_metrics.get("allocated_swap_mb", 0.0)
-                target_swap = max(SWAP_DRAIN_MB, int(current_swap_alloc - SWAP_STEP_REDUCTION_MB))
-                
-                if target_swap != current_swap_alloc:
-                    logger.info(f"[LXC {entity_id}] Flushing swap: reducing cap from {current_swap_alloc:.0f} to {target_swap} MB.")
-                else:
-                    logger.debug(f"[LXC {entity_id}] Maintaining swap cap ({target_swap} MB) for flush.")
-            elif swap_is_draining:
-                target_swap = max(SWAP_DRAIN_MB, current_metrics.get("allocated_swap_mb", 0.0))
-                logger.info(
-                    f"[LXC {entity_id}] Swap is actively draining to RAM ({swap_used:.0f} MB remaining). "
-                    f"Maintaining drain cap ({target_swap} MB) until clear."
-                )
-            elif LXC_TARGET_SWAP_MB == -1:
+            if LXC_TARGET_SWAP_MB == -1:
                 peak_swap = max(
                     predicted.get("predicted_swap_mb", 0.0),
                     predicted.get("recent_peak_swap", 0.0),
@@ -281,7 +226,18 @@ class Scaler:
                     LXC_MIN_SWAP_MB,
                 )
             else:
-                target_swap = max(LXC_TARGET_SWAP_MB, SWAP_DRAIN_MB)
+                target_swap = max(LXC_TARGET_SWAP_MB, LXC_MIN_SWAP_MB)
+            
+            # NATURAL RECLAIM "DO NO HARM" FLOOR:
+            # Never set the swap limit lower than the active swap usage plus a 32MB buffer.
+            # Why? Because lowering the cgroup limit below usage forces the Linux kernel into 
+            # a synchronous reclaim (pausing the container, reading disk sequentially to RAM). 
+            # This causes catastrophic I/O stalls in Proxmox. We MUST let the OS page it back 
+            # gently on its own schedule.
+            safe_floor = int(swap_used + 32)
+            if target_swap < safe_floor and swap_used > 5:
+                logger.debug(f"[LXC {entity_id}] Adjusting target swap from {target_swap} MB to safe floor {safe_floor} MB to prevent cgroup stall.")
+                target_swap = safe_floor
         else:
             target_swap = 0  # VMs manage swap internally; we don't set this
 
@@ -295,7 +251,6 @@ class Scaler:
             target_cpus != current_metrics["allocated_cpus"]
             or ram_diff >= 32
             or swap_diff > 0
-            or flush_swap
         ):
             cpu_action = "UNCHANGED"
             if target_cpus > current_metrics["allocated_cpus"]:
@@ -339,8 +294,6 @@ class Scaler:
                     )
                 except Exception as log_err:
                     logger.debug(f"[LXC {entity_id}] Scale event log failed: {log_err}")
-                if flush_swap:
-                    self.px.flush_lxc_swap(entity_id, target_mb=target_swap)
             elif entity_type == "VM":
                 self.px.update_vm_resources(entity_id, target_cpus, target_ram)
         else:
